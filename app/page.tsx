@@ -11,7 +11,6 @@ import {
   Trophy,
   Clock,
   TrendingUp,
-  Zap,
   ChevronRight,
   FolderOpen,
   Play,
@@ -35,6 +34,8 @@ interface Game {
   spread?: string;
   kalshiUrl: string;
   kalshiTicker: string;
+  kalshiStartTs: number;
+  kalshiEndTs: number;
   date?: string;
 }
 
@@ -53,6 +54,8 @@ const GAMES: Game[] = [
     kalshiUrl:
       "https://kalshi.com/markets/kxncaambgame/mens-college-basketball-mens-game/kxncaambgame-26feb09arizku",
     kalshiTicker: "KXNCAAMBGAME-26FEB09ARIZKU",
+    kalshiStartTs: 1770494460,
+    kalshiEndTs: 1770697320,
     date: "Feb 9, 2026",
   },
   {
@@ -69,6 +72,8 @@ const GAMES: Game[] = [
     kalshiUrl:
       "https://kalshi.com/markets/kxncaambgame/mens-college-basketball-mens-game/kxncaambgame-26feb07dukeunc",
     kalshiTicker: "KXNCAAMBGAME-26FEB07DUKEUNC",
+    kalshiStartTs: 0,
+    kalshiEndTs: 0,
   },
   {
     id: "3",
@@ -82,6 +87,8 @@ const GAMES: Game[] = [
     kalshiUrl:
       "https://kalshi.com/markets/kxncaambgame/mens-college-basketball-mens-game/kxncaambgame-26feb07gonzucla",
     kalshiTicker: "KXNCAAMBGAME-26FEB07GONZUCLA",
+    kalshiStartTs: 0,
+    kalshiEndTs: 0,
   },
   {
     id: "4",
@@ -95,6 +102,8 @@ const GAMES: Game[] = [
     kalshiUrl:
       "https://kalshi.com/markets/kxncaambgame/mens-college-basketball-mens-game/kxncaambgame-26feb08uktenn",
     kalshiTicker: "KXNCAAMBGAME-26FEB08UKTENN",
+    kalshiStartTs: 0,
+    kalshiEndTs: 0,
   },
   {
     id: "5",
@@ -108,6 +117,8 @@ const GAMES: Game[] = [
     kalshiUrl:
       "https://kalshi.com/markets/kxncaambgame/mens-college-basketball-mens-game/kxncaambgame-26feb08houbay",
     kalshiTicker: "KXNCAAMBGAME-26FEB08HOUBAY",
+    kalshiStartTs: 0,
+    kalshiEndTs: 0,
   },
   {
     id: "6",
@@ -121,6 +132,8 @@ const GAMES: Game[] = [
     kalshiUrl:
       "https://kalshi.com/markets/kxncaambgame/mens-college-basketball-mens-game/kxncaambgame-26feb09purmsu",
     kalshiTicker: "KXNCAAMBGAME-26FEB09PURMSU",
+    kalshiStartTs: 0,
+    kalshiEndTs: 0,
   },
   {
     id: "7",
@@ -136,6 +149,8 @@ const GAMES: Game[] = [
     kalshiUrl:
       "https://kalshi.com/markets/kxncaambgame/mens-college-basketball-mens-game/kxncaambgame-26feb06aubbama",
     kalshiTicker: "KXNCAAMBGAME-26FEB06AUBBAMA",
+    kalshiStartTs: 0,
+    kalshiEndTs: 0,
     date: "Feb 26, 2026",
   },
   {
@@ -152,6 +167,8 @@ const GAMES: Game[] = [
     kalshiUrl:
       "https://kalshi.com/markets/kxncaambgame/mens-college-basketball-mens-game/kxncaambgame-26feb05uconnnova",
     kalshiTicker: "KXNCAAMBGAME-26FEB05UCONNNOVA",
+    kalshiStartTs: 0,
+    kalshiEndTs: 0,
     date: "Feb 26, 2026",
   },
 ];
@@ -190,9 +207,6 @@ function Navbar() {
       className="sticky top-0 z-50 flex items-center justify-between px-6 py-4 border-b border-surface-border bg-background/80 backdrop-blur-xl"
     >
       <div className="flex items-center gap-3">
-        <div className="w-8 h-8 rounded-sm bg-accent flex items-center justify-center">
-          <Zap className="w-4 h-4 text-black" />
-        </div>
         <span className="text-xl font-bold tracking-tight">
           Sport<span className="text-accent">Signal</span>
         </span>
@@ -200,7 +214,7 @@ function Navbar() {
       <div className="flex items-center gap-4 text-sm text-muted">
         <span className="hidden sm:inline">NCAA Basketball</span>
         <div className="flex items-center gap-1.5">
-          <span className="w-2 h-2 rounded-full bg-green-500 pulse-live" />
+          <span className="w-2 h-2 rounded-md bg-green-500 pulse-live" />
           <span className="text-green-400 font-medium">
             {GAMES.filter((g) => g.status === "live").length} Live
           </span>
@@ -231,7 +245,7 @@ function StreamPanel({
       </div>
 
       {/* Stream embed area */}
-      <div className="relative rounded-md overflow-hidden border border-surface-border glow-orange">
+      <div className="relative rounded-md overflow-hidden border border-surface-border glow-gold">
         <div className="animated-border p-[1px] rounded-md">
           <div className="bg-surface rounded-md aspect-video flex flex-col items-center justify-center gap-3">
             {obsUrl ? (
@@ -325,7 +339,7 @@ function TickerPanel({
           >
             <div className="bg-surface-light border border-surface-border rounded-md p-4 flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <div className="w-2 h-2 rounded-full bg-accent pulse-live" />
+                <div className="w-2 h-2 rounded-md bg-accent pulse-live" />
                 <span className="font-mono text-sm text-accent">
                   {ticker.toUpperCase()}
                 </span>
@@ -343,7 +357,7 @@ function StatusBadge({ status }: { status: Game["status"] }) {
   if (status === "live") {
     return (
       <span className="flex items-center gap-1.5 text-xs font-bold text-green-400">
-        <span className="w-1.5 h-1.5 rounded-full bg-green-400 pulse-live" />
+        <span className="w-1.5 h-1.5 rounded-md bg-green-400 pulse-live" />
         LIVE
       </span>
     );
@@ -375,9 +389,9 @@ function GameCard({ game, index }: { game: Game; index: number }) {
       <div
         className={`relative bg-surface border rounded-md overflow-hidden transition-all duration-300 ${
           game.status === "live"
-            ? "border-accent/30 glow-orange"
+            ? "border-accent/30 glow-gold"
             : "border-surface-border hover:border-surface-border/80"
-        } hover:glow-orange`}
+        } hover:glow-gold`}
       >
         {/* Thumbnail/header band */}
         <div
@@ -490,7 +504,7 @@ function RecordingCard({ game, index }: { game: Game; index: number }) {
         whileHover={{ scale: 1.01, y: -2 }}
         className="block group cursor-pointer"
       >
-        <div className="relative bg-surface border border-surface-border rounded-md overflow-hidden transition-all duration-300 hover:border-accent/20 hover:glow-orange">
+        <div className="relative bg-surface border border-surface-border rounded-md overflow-hidden transition-all duration-300 hover:border-accent/20 hover:glow-gold">
           {/* Thumbnail area */}
           <div className="relative aspect-video bg-surface-light flex items-center justify-center">
             <div className="absolute inset-0 bg-gradient-to-t from-surface via-transparent to-transparent" />
@@ -593,7 +607,7 @@ export default function Home() {
           {liveGames.length > 0 && (
             <section className="mb-8">
               <div className="flex items-center gap-2 mb-4">
-                <span className="w-2 h-2 rounded-full bg-green-500 pulse-live" />
+                <span className="w-2 h-2 rounded-md bg-green-500 pulse-live" />
                 <h2 className="text-lg font-bold">Live Games</h2>
                 <span className="text-xs text-muted ml-1">
                   ({liveGames.length})

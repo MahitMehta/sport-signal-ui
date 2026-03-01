@@ -11,11 +11,13 @@ import {
   Play,
   Radio,
   Square,
+  TrendingUp,
   Trash2,
   TrendingUp,
   Trophy,
   Zap,
 } from "lucide-react";
+import KalshiChart from "@/app/components/KalshiChart";
 
 /* ------------------------------------------------------------------ */
 /*  DATA                                                               */
@@ -31,6 +33,8 @@ interface Game {
   scoreB: number;
   spread: string;
   kalshiTicker: string;
+  kalshiStartTs: number;
+  kalshiEndTs: number;
   kalshiUrl: string;
   date: string;
   videoSrc?: string;
@@ -47,6 +51,8 @@ const RECORDINGS: Record<string, Game> = {
     scoreB: 72,
     spread: "KU -3.5",
     kalshiTicker: "KXNCAAMBGAME-26FEB09ARIZKU",
+    kalshiStartTs: 1770494460,
+    kalshiEndTs: 1770697320,
     kalshiUrl:
       "https://kalshi.com/markets/kxncaambgame/mens-college-basketball-mens-game/kxncaambgame-26feb09arizku",
     date: "Feb 9, 2026",
@@ -62,6 +68,8 @@ const RECORDINGS: Record<string, Game> = {
     scoreB: 76,
     spread: "AUB -2.5",
     kalshiTicker: "KXNCAAMBGAME-26FEB06AUBBAMA",
+    kalshiStartTs: 0,
+    kalshiEndTs: 0,
     kalshiUrl:
       "https://kalshi.com/markets/kxncaambgame/mens-college-basketball-mens-game/kxncaambgame-26feb06aubbama",
     date: "Feb 26, 2026",
@@ -76,6 +84,8 @@ const RECORDINGS: Record<string, Game> = {
     scoreB: 63,
     spread: "UCONN -7.0",
     kalshiTicker: "KXNCAAMBGAME-26FEB05UCONNNOVA",
+    kalshiStartTs: 0,
+    kalshiEndTs: 0,
     kalshiUrl:
       "https://kalshi.com/markets/kxncaambgame/mens-college-basketball-mens-game/kxncaambgame-26feb05uconnnova",
     date: "Feb 26, 2026",
@@ -513,9 +523,6 @@ export default function RecordingDashboard({
           </Link>
           <div className="w-px h-5 bg-surface-border" />
           <div className="flex items-center gap-3">
-            <div className="w-7 h-7 rounded-sm bg-accent flex items-center justify-center">
-              <Zap className="w-3.5 h-3.5 text-black" />
-            </div>
             <span className="text-lg font-bold tracking-tight">
               Sport<span className="text-accent">Signal</span>
             </span>
@@ -595,7 +602,7 @@ export default function RecordingDashboard({
               Recording
             </div>
 
-            <div className="relative flex-1 rounded-md overflow-hidden border border-surface-border glow-orange">
+            <div className="relative flex-1 rounded-md overflow-hidden border border-surface-border glow-gold">
               <div className="animated-border p-[1px] rounded-md h-full">
                 <div className="bg-surface rounded-md h-full flex flex-col items-center justify-center gap-4">
                   {game.videoSrc ? (
@@ -645,14 +652,6 @@ export default function RecordingDashboard({
                   </>
                 )}
               </motion.button>
-
-              {capturing && (
-                <span className="flex items-center gap-1.5 text-xs text-green-400">
-                  <span className="w-1.5 h-1.5 rounded-full bg-green-400 pulse-live" />
-                  Auto capturing
-                </span>
-              )}
-
               <div className="ml-auto flex items-center gap-4 text-xs text-muted font-mono">
                 <span>
                   inflight:{" "}
@@ -673,6 +672,15 @@ export default function RecordingDashboard({
             >
               View market on Kalshi →
             </a>
+
+            {/* Kalshi Price Chart */}
+            <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-widest text-accent">
+              <TrendingUp className="w-4 h-4" />
+              Kalshi Price
+            </div>
+            <div className="h-52">
+              <KalshiChart ticker={game.kalshiTicker} startTs={game.kalshiStartTs} endTs={game.kalshiEndTs} />
+            </div>
           </motion.div>
 
           {/* Right: Event Stream */}
@@ -687,7 +695,7 @@ export default function RecordingDashboard({
                 <Activity className="w-4 h-4" />
                 Event Stream
               </div>
-              <span className="text-[10px] text-muted bg-surface-light border border-surface-border rounded-full px-2.5 py-0.5">
+              <span className="text-[10px] text-muted bg-surface-light border border-surface-border rounded-md px-2.5 py-0.5">
                 {eventCount} events
               </span>
             </div>
@@ -806,7 +814,7 @@ export default function RecordingDashboard({
               <div className="flex-1 overflow-y-scroll">
                 {entries.length === 0 ? (
                   <div className="flex-1 flex flex-col items-center justify-center gap-3 p-6 h-full">
-                    <div className="w-12 h-12 rounded-full bg-surface-light border border-surface-border flex items-center justify-center">
+                    <div className="w-12 h-12 rounded-md bg-surface-light border border-surface-border flex items-center justify-center">
                       <Activity className="w-5 h-5 text-muted/40" />
                     </div>
                     <p className="text-sm text-muted text-center">
@@ -828,7 +836,7 @@ export default function RecordingDashboard({
                       >
                         <div className="flex items-center gap-2 mb-0.5">
                           {entry.pending && (
-                            <span className="inline-block w-3 h-3 border-2 border-accent border-t-transparent rounded-full animate-spin" />
+                            <span className="inline-block w-3 h-3 border-2 border-accent border-t-transparent rounded-md animate-spin" />
                           )}
                           <span className="text-muted">{entry.ts}</span>
                         </div>

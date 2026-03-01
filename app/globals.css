@@ -3,9 +3,9 @@
 @theme inline {
   --color-background: #0a0a0a;
   --color-foreground: #ededed;
-  --color-accent: #F57C00;
-  --color-accent-light: #FF9800;
-  --color-accent-dim: #E65100;
+  --color-accent: #CFB991;
+  --color-accent-light: #DACC9D;
+  --color-accent-dim: #B89F65;
   --color-surface: #141414;
   --color-surface-light: #1a1a1a;
   --color-surface-border: #2a2a2a;
@@ -39,13 +39,13 @@ body {
   background: #555;
 }
 
-/* Glow effect for accent elements */
-.glow-orange {
-  box-shadow: 0 0 20px rgba(245, 124, 0, 0.15), 0 0 60px rgba(245, 124, 0, 0.05);
+/* Glow effect for accent elements - Purdue Gold */
+.glow-gold {
+  box-shadow: 0 0 20px rgba(207, 185, 145, 0.15), 0 0 60px rgba(207, 185, 145, 0.05);
 }
 
-.glow-orange-strong {
-  box-shadow: 0 0 20px rgba(245, 124, 0, 0.3), 0 0 60px rgba(245, 124, 0, 0.1);
+.glow-gold-strong {
+  box-shadow: 0 0 20px rgba(207, 185, 145, 0.3), 0 0 60px rgba(207, 185, 145, 0.1);
 }
 
 /* Animated gradient border */
@@ -56,7 +56,7 @@ body {
 }
 
 .animated-border {
-  background: linear-gradient(135deg, #F57C00, #FF9800, #E65100, #F57C00);
+  background: linear-gradient(135deg, #CFB991, #DACC9D, #B89F65, #CFB991);
   background-size: 300% 300%;
   animation: gradient-shift 4s ease infinite;
 }
