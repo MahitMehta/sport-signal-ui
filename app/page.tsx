@@ -260,129 +260,40 @@ const stagger = { visible: { transition: { staggerChildren: 0.06 } } };
 /*  BASKETBALL VISUAL                                                  */
 /* ------------------------------------------------------------------ */
 
-function BasketballScene() {
+function AbstractSignalLines() {
   return (
-    <div className="relative w-full h-full flex items-center justify-center select-none pointer-events-none">
+    <div className="relative w-full h-full overflow-hidden select-none pointer-events-none">
       <style>{`
-        @keyframes bb-float{0%,100%{transform:translateY(0px)}50%{transform:translateY(-14px)}}
-        @keyframes bb-shadow-pulse{0%,100%{transform:scaleX(1);opacity:0.22}50%{transform:scaleX(0.74);opacity:0.07}}
-        @keyframes arc-glow{0%,100%{stroke-dashoffset:0}50%{stroke-dashoffset:-60}}
-        .bb-float{animation:bb-float 3.6s ease-in-out infinite}
-        .bb-shadow{animation:bb-shadow-pulse 3.6s ease-in-out infinite}
-        .arc-dash{stroke-dasharray:28 14;animation:arc-glow 4.5s ease-in-out infinite}
+        @keyframes sig-rtl{0%{transform:translateX(105%);opacity:0}10%{opacity:1}88%{opacity:1}100%{transform:translateX(-105%);opacity:0}}
+        @keyframes sig-ltr{0%{transform:translateX(-105%);opacity:0}10%{opacity:1}88%{opacity:1}100%{transform:translateX(105%);opacity:0}}
+        @keyframes sig-pulse{0%,100%{opacity:0}35%,65%{opacity:1}}
       `}</style>
 
-      {/* Court arc background */}
-      <svg className="absolute inset-0 w-full h-full opacity-[0.05]" viewBox="0 0 340 340" preserveAspectRatio="xMidYMid meet">
-        <path d="M 30 320 A 155 155 0 0 1 310 320" fill="none" stroke="#CFB991" strokeWidth="1.2" className="arc-dash" />
-        <rect x="110" y="180" width="120" height="140" fill="none" stroke="#CFB991" strokeWidth="1" opacity="0.6" />
-        <circle cx="170" cy="180" r="52" fill="none" stroke="#CFB991" strokeWidth="1" opacity="0.5" />
-        <circle cx="170" cy="170" r="22" fill="none" stroke="#CFB991" strokeWidth="1" opacity="0.4" />
-        <circle cx="170" cy="298" r="10" fill="none" stroke="#CFB991" strokeWidth="1.5" opacity="0.7" />
-        <line x1="170" y1="288" x2="170" y2="278" stroke="#CFB991" strokeWidth="1.5" opacity="0.6" />
-      </svg>
+      {/* Sliding gold lines */}
+      <div style={{position:"absolute",height:"1px",width:"62%",top:"12%",background:"linear-gradient(90deg,transparent,#CFB991,transparent)",transform:"rotate(-5deg)",animation:"sig-rtl 7s linear 0s infinite",opacity:0.38}} />
+      <div style={{position:"absolute",height:"1px",width:"44%",top:"26%",background:"linear-gradient(90deg,transparent,#CFB991,transparent)",transform:"rotate(4deg)",animation:"sig-ltr 8.5s linear 1.8s infinite",opacity:0.24}} />
+      <div style={{position:"absolute",height:"1px",width:"72%",top:"40%",background:"linear-gradient(90deg,transparent,#CFB991,transparent)",transform:"rotate(-3deg)",animation:"sig-rtl 6s linear 3.4s infinite",opacity:0.32}} />
+      <div style={{position:"absolute",height:"1px",width:"55%",top:"57%",background:"linear-gradient(90deg,transparent,#CFB991,transparent)",transform:"rotate(7deg)",animation:"sig-ltr 9.2s linear 0.6s infinite",opacity:0.22}} />
+      <div style={{position:"absolute",height:"1px",width:"48%",top:"72%",background:"linear-gradient(90deg,transparent,#CFB991,transparent)",transform:"rotate(-6deg)",animation:"sig-rtl 7.8s linear 2.6s infinite",opacity:0.30}} />
+      <div style={{position:"absolute",height:"1px",width:"38%",top:"87%",background:"linear-gradient(90deg,transparent,#CFB991,transparent)",transform:"rotate(3deg)",animation:"sig-ltr 5.8s linear 4.4s infinite",opacity:0.18}} />
 
-      {/* Main basketball */}
-      <div className="relative flex flex-col items-center">
-        <div className="bb-float">
-          {/*
-            Real basketball seam geometry (200×200, center 100,100, r=90):
-            Front view shows 3 channels:
-              1. Horizontal equatorial groove (two close horizontal curves)
-              2. Left side C-arc (from top pole, hugs left edge, to bottom pole)
-              3. Right side C-arc (mirror)
-            Each channel = two parallel dark strokes with orange gap = groove.
-            Outer arcs use CP outside viewBox; clipPath keeps them inside circle.
-          */}
-          <svg width="180" height="180" viewBox="0 0 200 200">
-            <defs>
-              {/* Sphere gradient — lit upper-left */}
-              <radialGradient id="bbGrad" cx="37%" cy="30%" r="68%">
-                <stop offset="0%"   stopColor="#FFC07A" />
-                <stop offset="22%"  stopColor="#F07222" />
-                <stop offset="58%"  stopColor="#C04A08" />
-                <stop offset="100%" stopColor="#6E2400" />
-              </radialGradient>
-              {/* Specular highlight blob */}
-              <radialGradient id="bbSpec" cx="31%" cy="22%" r="34%">
-                <stop offset="0%"   stopColor="rgba(255,248,220,0.72)" />
-                <stop offset="55%"  stopColor="rgba(255,200,100,0.15)" />
-                <stop offset="100%" stopColor="rgba(255,255,255,0)" />
-              </radialGradient>
-              {/* Rim darkening for roundness */}
-              <radialGradient id="bbRim" cx="50%" cy="50%" r="50%">
-                <stop offset="55%"  stopColor="rgba(0,0,0,0)" />
-                <stop offset="100%" stopColor="rgba(0,0,0,0.58)" />
-              </radialGradient>
-              {/* Clip everything to circle */}
-              <clipPath id="bClip">
-                <circle cx="100" cy="100" r="89" />
-              </clipPath>
-            </defs>
+      {/* Faster brighter accent lines */}
+      <div style={{position:"absolute",height:"1px",width:"32%",top:"34%",background:"linear-gradient(90deg,transparent,#DAC98A,transparent)",transform:"rotate(-11deg)",animation:"sig-rtl 3.6s linear 1s infinite",opacity:0.50}} />
+      <div style={{position:"absolute",height:"1px",width:"26%",top:"66%",background:"linear-gradient(90deg,transparent,#DAC98A,transparent)",transform:"rotate(9deg)",animation:"sig-ltr 4.2s linear 2.2s infinite",opacity:0.42}} />
+      <div style={{position:"absolute",height:"2px",width:"18%",top:"48%",background:"linear-gradient(90deg,transparent,#CFB991,transparent)",transform:"rotate(-14deg)",animation:"sig-rtl 2.9s linear 0.4s infinite",opacity:0.55}} />
 
-            {/* ── Ball body ── */}
-            <circle cx="100" cy="100" r="90" fill="url(#bbGrad)" />
+      {/* Pulsing background scan lines */}
+      <div style={{position:"absolute",height:"1px",width:"100%",top:"22%",background:"linear-gradient(90deg,transparent,rgba(207,185,145,0.08),transparent)",animation:"sig-pulse 6s ease-in-out 0s infinite"}} />
+      <div style={{position:"absolute",height:"1px",width:"100%",top:"50%",background:"linear-gradient(90deg,transparent,rgba(207,185,145,0.10),transparent)",animation:"sig-pulse 5s ease-in-out 2s infinite"}} />
+      <div style={{position:"absolute",height:"1px",width:"100%",top:"78%",background:"linear-gradient(90deg,transparent,rgba(207,185,145,0.07),transparent)",animation:"sig-pulse 7s ease-in-out 1s infinite"}} />
 
-            {/* ── Seam channels, clipped to ball ── */}
-            <g clipPath="url(#bClip)" fill="none" strokeLinecap="round">
-
-              {/*
-                CHANNEL 1 — Horizontal equatorial groove
-                Two curves bowing up/down from the center line.
-                Gap at centre ~8 px = realistic narrow groove.
-              */}
-              <path d="M 10 100 C 55 95 145 95 190 100"
-                    stroke="#1A0800" strokeWidth="4" />
-              <path d="M 10 100 C 55 105 145 105 190 100"
-                    stroke="#1A0800" strokeWidth="4" />
-              {/* groove glint on upper edge */}
-              <path d="M 10 100 C 55 95 145 95 190 100"
-                    stroke="#8B3A10" strokeWidth="1.4" opacity="0.45" />
-
-              {/*
-                CHANNEL 2 — Left side C-arc seam
-                From top pole (100,10) → curves around left edge → bottom pole (100,190).
-                Outer line: CP at x=−20 so it hugs the circle's left edge (x≈10 at y=100).
-                Inner line: CP at x=−9 so it sits ~10 px inside outer.
-              */}
-              <path d="M 100 10 C -20 45 -20 155 100 190"
-                    stroke="#1A0800" strokeWidth="4" />
-              <path d="M 100 10 C  -9 45  -9 155 100 190"
-                    stroke="#1A0800" strokeWidth="4" />
-              {/* groove glint */}
-              <path d="M 100 10 C -20 45 -20 155 100 190"
-                    stroke="#8B3A10" strokeWidth="1.4" opacity="0.45" />
-
-              {/*
-                CHANNEL 3 — Right side C-arc seam (mirror of left)
-                Outer CP at x=220, inner at x=209.
-              */}
-              <path d="M 100 10 C 220 45 220 155 100 190"
-                    stroke="#1A0800" strokeWidth="4" />
-              <path d="M 100 10 C 209 45 209 155 100 190"
-                    stroke="#1A0800" strokeWidth="4" />
-              <path d="M 100 10 C 220 45 220 155 100 190"
-                    stroke="#8B3A10" strokeWidth="1.4" opacity="0.45" />
-
-            </g>
-
-            {/* ── Specular highlight (rendered on top of seams) ── */}
-            <circle cx="100" cy="100" r="90" fill="url(#bbSpec)" />
-            {/* ── Edge vignette ── */}
-            <circle cx="100" cy="100" r="90" fill="url(#bbRim)" />
-            {/* ── Crisp outline ── */}
-            <circle cx="100" cy="100" r="90" fill="none" stroke="rgba(0,0,0,0.38)" strokeWidth="2" />
-          </svg>
-        </div>
-        {/* Floating shadow */}
-        <div
-          className="bb-shadow rounded-full"
-          style={{ width: "110px", height: "14px", background: "radial-gradient(ellipse, rgba(0,0,0,0.48) 0%, transparent 70%)", marginTop: "2px" }}
-        />
-      </div>
+      {/* Tiny white flicks */}
+      <div style={{position:"absolute",height:"1px",width:"22%",top:"19%",background:"linear-gradient(90deg,transparent,rgba(255,255,255,0.18),transparent)",transform:"rotate(-16deg)",animation:"sig-rtl 3.8s linear 3.6s infinite",opacity:0.8}} />
+      <div style={{position:"absolute",height:"1px",width:"16%",top:"81%",background:"linear-gradient(90deg,transparent,rgba(255,255,255,0.14),transparent)",transform:"rotate(13deg)",animation:"sig-ltr 3.0s linear 1.4s infinite",opacity:0.8}} />
     </div>
   );
 }
+
 
 /* ------------------------------------------------------------------ */
 /*  TICKER TAPE                                                        */
@@ -752,7 +663,7 @@ export default function Home() {
                 transition={{ duration: 0.75, ease: [0.22, 1, 0.36, 1] }}
                 className="text-[clamp(3.5rem,10vw,6rem)] font-black tracking-tighter leading-[0.86] select-none"
               >
-                <span className="text-foreground block">SPORT</span>
+                <span className="text-foreground block">VISION</span>
                 <span className="block text-accent" style={{ textShadow: "0 0 80px rgba(207,185,145,0.28), 0 0 30px rgba(207,185,145,0.12)" }}>
                   SIGNAL.
                 </span>
@@ -795,15 +706,15 @@ export default function Home() {
               </motion.div>
             </div>
 
-            {/* Right: Basketball animation */}
+            {/* Right: Abstract signal lines */}
             <motion.div
-              initial={{ opacity: 0, scale: 0.85 }}
-              animate={{ opacity: 1, scale: 1 }}
-              transition={{ duration: 0.9, delay: 0.2, ease: [0.22, 1, 0.36, 1] }}
-              className="shrink-0"
-              style={{ width: "280px", height: "260px" }}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 1.2, delay: 0.3 }}
+              className="shrink-0 overflow-hidden"
+              style={{ width: "400px", height: "240px" }}
             >
-              <BasketballScene />
+              <AbstractSignalLines />
             </motion.div>
           </div>
         </div>
