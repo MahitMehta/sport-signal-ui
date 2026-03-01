@@ -1,8 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import Link from "next/link";
+import Hls from "hls.js";
 import {
   Tv,
   BarChart3,
@@ -15,6 +17,8 @@ import {
   FolderOpen,
   Play,
   Calendar,
+  Loader2,
+  AlertCircle,
 } from "lucide-react";
 
 /* ------------------------------------------------------------------ */
@@ -227,10 +231,99 @@ function Navbar() {
 function StreamPanel({
   obsUrl,
   setObsUrl,
+  onConnected,
 }: {
   obsUrl: string;
   setObsUrl: (v: string) => void;
+  onConnected: (url: string) => void;
 }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const hlsRef = useRef<Hls | null>(null);
+  const [streamStatus, setStreamStatus] = useState<
+    "idle" | "connecting" | "playing" | "error"
+  >("idle");
+  const [errorMsg, setErrorMsg] = useState("");
+
+  const attachStream = useCallback(
+    (url: string) => {
+      const video = videoRef.current;
+      if (!video || !url) return;
+
+      // Tear down previous HLS instance
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+
+      setStreamStatus("connecting");
+      setErrorMsg("");
+
+      const isHls = url.includes(".m3u8");
+
+      if (isHls && Hls.isSupported()) {
+        const hls = new Hls({
+          enableWorker: true,
+          lowLatencyMode: true,
+        });
+        hlsRef.current = hls;
+        hls.loadSource(url);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          video.play().catch(() => {});
+          setStreamStatus("playing");
+          onConnected(url);
+        });
+        hls.on(Hls.Events.ERROR, (_event, data) => {
+          if (data.fatal) {
+            setStreamStatus("error");
+            setErrorMsg(
+              data.type === Hls.ErrorTypes.NETWORK_ERROR
+                ? "Network error — check your stream URL"
+                : "Stream playback failed"
+            );
+          }
+        });
+      } else if (isHls && video.canPlayType("application/vnd.apple.mpegurl")) {
+        // Native HLS (Safari)
+        video.src = url;
+        video.addEventListener("loadedmetadata", () => {
+          video.play().catch(() => {});
+          setStreamStatus("playing");
+          onConnected(url);
+        }, { once: true });
+        video.addEventListener("error", () => {
+          setStreamStatus("error");
+          setErrorMsg("Stream playback failed");
+        }, { once: true });
+      } else {
+        // Direct video URL (mp4, webm, etc.)
+        video.src = url;
+        video.addEventListener("loadedmetadata", () => {
+          video.play().catch(() => {});
+          setStreamStatus("playing");
+          onConnected(url);
+        }, { once: true });
+        video.addEventListener("error", () => {
+          setStreamStatus("error");
+          setErrorMsg("Could not load video — check URL format");
+        }, { once: true });
+      }
+    },
+    [onConnected]
+  );
+
+  // Attach stream when URL changes (debounced on submit)
+  const handleSubmit = useCallback(() => {
+    if (obsUrl.trim()) attachStream(obsUrl.trim());
+  }, [obsUrl, attachStream]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (hlsRef.current) hlsRef.current.destroy();
+    };
+  }, []);
+
   return (
     <motion.section
       variants={fadeUp}
@@ -244,40 +337,94 @@ function StreamPanel({
         Livestream
       </div>
 
-      {/* Stream embed area */}
+      {/* Stream video area */}
       <div className="relative rounded-md overflow-hidden border border-surface-border glow-gold">
         <div className="animated-border p-[1px] rounded-md">
-          <div className="bg-surface rounded-md aspect-video flex flex-col items-center justify-center gap-3">
-            {obsUrl ? (
-              <iframe
-                src={obsUrl}
-                className="w-full h-full rounded-md"
-                allowFullScreen
-                allow="autoplay"
-              />
-            ) : (
-              <>
-                <Radio className="w-10 h-10 text-muted" />
-                <p className="text-muted text-sm">
-                  Paste your OBS stream URL below
-                </p>
-              </>
+          <div className="bg-surface rounded-md aspect-video flex flex-col items-center justify-center gap-3 relative">
+            <video
+              ref={videoRef}
+              className={`w-full h-full rounded-md ${
+                streamStatus === "playing" ? "block" : "hidden"
+              }`}
+              muted
+              playsInline
+              crossOrigin="anonymous"
+            />
+            {streamStatus !== "playing" && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
+                {streamStatus === "connecting" ? (
+                  <>
+                    <Loader2 className="w-10 h-10 text-accent animate-spin" />
+                    <p className="text-muted text-sm">
+                      Connecting to stream…
+                    </p>
+                  </>
+                ) : streamStatus === "error" ? (
+                  <>
+                    <AlertCircle className="w-10 h-10 text-red-400" />
+                    <p className="text-red-400 text-sm">{errorMsg}</p>
+                  </>
+                ) : (
+                  <>
+                    <Radio className="w-10 h-10 text-muted" />
+                    <p className="text-muted text-sm">
+                      Enter your stream URL and press Connect
+                    </p>
+                  </>
+                )}
+              </div>
             )}
           </div>
         </div>
       </div>
 
-      {/* OBS URL input */}
-      <div className="relative group">
-        <input
-          type="text"
-          placeholder="OBS Livestream URL (e.g. rtmp://...)"
-          value={obsUrl}
-          onChange={(e) => setObsUrl(e.target.value)}
-          className="w-full bg-surface border border-surface-border rounded-md px-4 py-3 pl-10 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/20 transition-all"
-        />
-        <Tv className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted group-focus-within:text-accent transition-colors" />
+      {/* OBS URL input + connect button */}
+      <div className="flex gap-3">
+        <div className="relative flex-1 group">
+          <input
+            type="text"
+            placeholder="Stream URL (e.g. http://localhost:8080/live/stream.m3u8)"
+            value={obsUrl}
+            onChange={(e) => setObsUrl(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
+            className="w-full bg-surface border border-surface-border rounded-md px-4 py-3 pl-10 text-sm text-foreground placeholder:text-muted focus:outline-none focus:border-accent/50 focus:ring-1 focus:ring-accent/20 transition-all"
+          />
+          <Tv className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted group-focus-within:text-accent transition-colors" />
+        </div>
+        <motion.button
+          whileHover={{ scale: 1.05 }}
+          whileTap={{ scale: 0.95 }}
+          onClick={handleSubmit}
+          className="bg-accent hover:bg-accent-light text-black font-bold px-6 py-3 rounded-md flex items-center gap-2 transition-colors shrink-0"
+        >
+          <span className="hidden sm:inline">Connect</span>
+          <Play className="w-4 h-4" />
+        </motion.button>
       </div>
+
+      {/* Stream status indicator */}
+      <AnimatePresence>
+        {streamStatus === "playing" && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            className="overflow-hidden"
+          >
+            <div className="bg-surface-light border border-surface-border rounded-md p-4 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-2 h-2 rounded-md bg-green-500 pulse-live" />
+                <span className="text-sm text-green-400 font-medium">
+                  Stream connected
+                </span>
+              </div>
+              <span className="text-xs text-muted font-mono truncate max-w-50">
+                {obsUrl}
+              </span>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </motion.section>
   );
 }
@@ -560,6 +707,7 @@ function RecordingCard({ game, index }: { game: Game; index: number }) {
 /* ------------------------------------------------------------------ */
 
 export default function Home() {
+  const router = useRouter();
   const [obsUrl, setObsUrl] = useState("");
   const [ticker, setTicker] = useState("");
 
@@ -590,7 +738,9 @@ export default function Home() {
 
         {/* Stream + Ticker panels */}
         <div className="grid lg:grid-cols-2 gap-6">
-          <StreamPanel obsUrl={obsUrl} setObsUrl={setObsUrl} />
+          <StreamPanel obsUrl={obsUrl} setObsUrl={setObsUrl} onConnected={(url) => {
+            router.push(`/recordings/live?stream=${encodeURIComponent(url)}`);
+          }} />
           <TickerPanel
             ticker={ticker}
             setTicker={setTicker}

@@ -1,8 +1,10 @@
 "use client";
 
 import { use, useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { motion } from "framer-motion";
 import Link from "next/link";
+import Hls from "hls.js";
 import {
   Activity,
   ArrowLeft,
@@ -11,7 +13,6 @@ import {
   Play,
   Radio,
   Square,
-  TrendingUp,
   Trash2,
   TrendingUp,
   Trophy,
@@ -123,11 +124,32 @@ export default function RecordingDashboard({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
-  const game = RECORDINGS[id];
+  const searchParams = useSearchParams();
+  const streamUrl = id === "live" ? searchParams.get("stream") : null;
+  const isLive = id === "live" && !!streamUrl;
+
+  const game = isLive
+    ? {
+        id: "live",
+        teamA: "Team A",
+        teamB: "Team B",
+        teamAShort: "A",
+        teamBShort: "B",
+        scoreA: 0,
+        scoreB: 0,
+        spread: "—",
+        kalshiTicker: "",
+        kalshiStartTs: 0,
+        kalshiEndTs: 0,
+        kalshiUrl: "",
+        date: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
+      }
+    : RECORDINGS[id];
 
   /* refs */
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const hlsRef = useRef<Hls | null>(null);
   const autoRunning = useRef(false);
   const rafId = useRef<number | null>(null);
   const lastCaptureTime = useRef(-1);
@@ -478,8 +500,44 @@ export default function RecordingDashboard({
     return () => {
       autoRunning.current = false;
       if (rafId.current) cancelAnimationFrame(rafId.current);
+      if (hlsRef.current) hlsRef.current.destroy();
     };
   }, []);
+
+  /* attach HLS livestream */
+  useEffect(() => {
+    if (!isLive || !streamUrl) return;
+    const video = videoRef.current;
+    if (!video) return;
+
+    const isHls = streamUrl.includes(".m3u8");
+
+    if (isHls && Hls.isSupported()) {
+      const hls = new Hls({ enableWorker: true, lowLatencyMode: true });
+      hlsRef.current = hls;
+      hls.loadSource(streamUrl);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        video.play().catch(() => {});
+      });
+      hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (data.fatal) console.error("[hls] fatal error:", data.type);
+      });
+    } else if (isHls && video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.src = streamUrl;
+      video.addEventListener("loadedmetadata", () => video.play().catch(() => {}), { once: true });
+    } else {
+      video.src = streamUrl;
+      video.addEventListener("loadedmetadata", () => video.play().catch(() => {}), { once: true });
+    }
+
+    return () => {
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+    };
+  }, [isLive, streamUrl]);
 
   if (!game) {
     return (
@@ -529,8 +587,12 @@ export default function RecordingDashboard({
           </div>
         </div>
         <div className="flex items-center gap-3 text-sm">
-          <span className="text-[10px] font-bold bg-surface-light border border-surface-border rounded-md px-2 py-1 text-muted uppercase tracking-wider">
-            Recording
+          <span className={`text-[10px] font-bold border rounded-md px-2 py-1 uppercase tracking-wider ${
+            isLive
+              ? "bg-green-500/10 border-green-500/30 text-green-400"
+              : "bg-surface-light border-surface-border text-muted"
+          }`}>
+            {isLive ? "Live" : "Recording"}
           </span>
         </div>
       </motion.nav>
@@ -598,18 +660,21 @@ export default function RecordingDashboard({
             className="flex flex-col gap-4"
           >
             <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-widest text-accent">
-              <Play className="w-4 h-4" />
-              Recording
+              {isLive ? <Radio className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+              {isLive ? "Livestream" : "Recording"}
             </div>
 
             <div className="relative flex-1 rounded-md overflow-hidden border border-surface-border glow-gold">
               <div className="animated-border p-[1px] rounded-md h-full">
                 <div className="bg-surface rounded-md h-full flex flex-col items-center justify-center gap-4">
-                  {game.videoSrc ? (
+                  {game.videoSrc || isLive ? (
                     <video
                       ref={videoRef}
-                      src={game.videoSrc}
-                      controls
+                      src={game.videoSrc ?? undefined}
+                      controls={!isLive}
+                      muted={isLive}
+                      playsInline
+                      crossOrigin="anonymous"
                       className="w-full h-full rounded-md object-contain bg-black"
                     />
                   ) : (
@@ -664,23 +729,29 @@ export default function RecordingDashboard({
               </div>
             </div>
 
-            <a
-              href={game.kalshiUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-xs text-accent hover:underline"
-            >
-              View market on Kalshi →
-            </a>
+            {game.kalshiUrl && (
+              <a
+                href={game.kalshiUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs text-accent hover:underline"
+              >
+                View market on Kalshi →
+              </a>
+            )}
 
             {/* Kalshi Price Chart */}
-            <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-widest text-accent">
-              <TrendingUp className="w-4 h-4" />
-              Kalshi Price
-            </div>
-            <div className="h-52">
-              <KalshiChart ticker={game.kalshiTicker} startTs={game.kalshiStartTs} endTs={game.kalshiEndTs} />
-            </div>
+            {game.kalshiTicker && (
+              <>
+                <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-widest text-accent">
+                  <TrendingUp className="w-4 h-4" />
+                  Kalshi Price
+                </div>
+                <div className="h-52">
+                  <KalshiChart ticker={game.kalshiTicker} startTs={game.kalshiStartTs} endTs={game.kalshiEndTs} />
+                </div>
+              </>
+            )}
           </motion.div>
 
           {/* Right: Event Stream */}

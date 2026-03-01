@@ -15,7 +15,6 @@ interface KalshiChartProps {
   ticker: string;
   startTs: number;
   endTs: number;
-  range?: "1D" | "5D" | "1M";
 }
 
 /* ------------------------------------------------------------------ */
@@ -28,11 +27,27 @@ const GRID_COLOR = "#1a1a1a";
 const LABEL_COLOR = "#555";
 const PAD = { top: 16, right: 12, bottom: 28, left: 46 };
 
+/** Return a unix timestamp (seconds) for 8:30 PM EST on the same calendar day as `refTs`. */
+function get830pmEstTs(refTs: number): number {
+  // EST is UTC-5
+  const refMs = refTs * 1000;
+  // Get the date in EST by shifting to UTC-5
+  const estOffsetMs = 5 * 60 * 60 * 1000;
+  const estDate = new Date(refMs - estOffsetMs);
+  // Build 8:30 PM EST on that calendar day
+  const year = estDate.getUTCFullYear();
+  const month = estDate.getUTCMonth();
+  const day = estDate.getUTCDate();
+  // 8:30 PM EST = 20:30 EST = 01:30 next day UTC (20:30 + 5:00)
+  const target = new Date(Date.UTC(year, month, day, 20 + 5, 30, 0));
+  return Math.floor(target.getTime() / 1000);
+}
+
 /* ------------------------------------------------------------------ */
 /*  COMPONENT                                                          */
 /* ------------------------------------------------------------------ */
 
-export default function KalshiChart({ ticker, startTs, endTs, range = "1D" }: KalshiChartProps) {
+export default function KalshiChart({ ticker, startTs, endTs }: KalshiChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -40,7 +55,6 @@ export default function KalshiChart({ ticker, startTs, endTs, range = "1D" }: Ka
   const [marketLabel, setMarketLabel] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeRange, setActiveRange] = useState(range);
   const [hoverInfo, setHoverInfo] = useState<{
     forecast: number;
     time: string;
@@ -50,11 +64,11 @@ export default function KalshiChart({ ticker, startTs, endTs, range = "1D" }: Ka
 
   /* ---- fetch ---- */
 
-  const fetchData = useCallback(async (t: string, r: string, sTs: number, eTs: number) => {
+  const fetchData = useCallback(async (t: string, sTs: number, eTs: number) => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/kalshi-candles?ticker=${encodeURIComponent(t)}&range=${r}&start_ts=${sTs}&end_ts=${eTs}`);
+      const res = await fetch(`/api/kalshi-candles?ticker=${encodeURIComponent(t)}&range=1D&start_ts=${sTs}&end_ts=${eTs}`);
       const json = await res.json();
       if (!res.ok) {
         setError(json.error || "Failed to load");
@@ -70,7 +84,14 @@ export default function KalshiChart({ ticker, startTs, endTs, range = "1D" }: Ka
           numerical_forecast: c.numerical_forecast ?? 0,
         }))
         .filter((c: ForecastPoint) => c.numerical_forecast > 0);
-      setData(points);
+
+      // Filter to only show data from 8:30 PM EST onward
+      if (points.length > 0) {
+        const cutoff = get830pmEstTs(points[0].end_period_ts);
+        setData(points.filter((p) => p.end_period_ts >= cutoff));
+      } else {
+        setData(points);
+      }
     } catch {
       setError("Network error");
       setData([]);
@@ -80,8 +101,8 @@ export default function KalshiChart({ ticker, startTs, endTs, range = "1D" }: Ka
   }, []);
 
   useEffect(() => {
-    if (ticker) fetchData(ticker, activeRange, startTs, endTs);
-  }, [ticker, activeRange, startTs, endTs, fetchData]);
+    if (ticker) fetchData(ticker, startTs, endTs);
+  }, [ticker, startTs, endTs, fetchData]);
 
   /* ---- drawing ---- */
 
@@ -153,7 +174,7 @@ export default function KalshiChart({ ticker, startTs, endTs, range = "1D" }: Ka
       ctx.fillText(p + "%", PAD.left - 4, y);
     }
 
-    // Time labels
+    // Time labels (always show time of day)
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     const totalMs = maxTs - minTs;
@@ -161,12 +182,7 @@ export default function KalshiChart({ ticker, startTs, endTs, range = "1D" }: Ka
     for (let i = 0; i <= labelCount; i++) {
       const ts = minTs + (totalMs * i) / labelCount;
       const d = new Date(ts);
-      let label: string;
-      if (activeRange === "1M") {
-        label = d.toLocaleDateString([], { month: "short", day: "numeric" });
-      } else {
-        label = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-      }
+      const label = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
       ctx.fillText(label, xOf(ts), h - PAD.bottom + 6);
     }
 
@@ -232,7 +248,7 @@ export default function KalshiChart({ ticker, startTs, endTs, range = "1D" }: Ka
       ctx.fillStyle = LINE_COLOR;
       ctx.fill();
     }
-  }, [data, activeRange]);
+  }, [data]);
 
   useEffect(() => {
     draw();
@@ -265,13 +281,10 @@ export default function KalshiChart({ ticker, startTs, endTs, range = "1D" }: Ka
       );
       const d = data[idx];
       const ts = new Date(d.end_period_ts * 1000);
-      const timeStr =
-        activeRange === "1M"
-          ? ts.toLocaleDateString([], { month: "short", day: "numeric" })
-          : ts.toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-            });
+      const timeStr = ts.toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
 
       setHoverInfo({
         forecast: d.numerical_forecast,
@@ -280,41 +293,22 @@ export default function KalshiChart({ ticker, startTs, endTs, range = "1D" }: Ka
         y: e.clientY - rect.top,
       });
     },
-    [data, activeRange]
+    [data]
   );
 
   /* ---- render ---- */
 
-  const ranges: Array<"1D" | "5D" | "1M"> = ["1D", "5D", "1M"];
-
   return (
     <div className="flex flex-col gap-2 h-full">
       {/* Header row */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3 text-[10px] font-mono text-muted">
-          <span className="flex items-center gap-1">
-            <span className="w-2.5 h-0.5 rounded-full inline-block" style={{ background: LINE_COLOR }} />
-            Forecast
-          </span>
-          {marketLabel && (
-            <span className="text-muted/60 ml-1">{marketLabel}</span>
-          )}
-        </div>
-        <div className="flex gap-1">
-          {ranges.map((r) => (
-            <button
-              key={r}
-              onClick={() => setActiveRange(r)}
-              className={`text-[10px] font-bold px-2 py-0.5 rounded transition-colors ${
-                activeRange === r
-                  ? "bg-accent text-black"
-                  : "text-muted hover:text-foreground"
-              }`}
-            >
-              {r}
-            </button>
-          ))}
-        </div>
+      <div className="flex items-center gap-3 text-[10px] font-mono text-muted">
+        <span className="flex items-center gap-1">
+          <span className="w-2.5 h-0.5 rounded-full inline-block" style={{ background: LINE_COLOR }} />
+          Forecast
+        </span>
+        {marketLabel && (
+          <span className="text-muted/60 ml-1">{marketLabel}</span>
+        )}
       </div>
 
       {/* Chart */}

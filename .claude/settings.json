@@ -5,7 +5,11 @@
       "Bash(npx next build)",
       "WebFetch(domain:docs.kalshi.com)",
       "Bash(curl -s \"https://api.elections.kalshi.com/trade-api/v2/markets/KXNCAAMBGAME-26FEB09ARIZKU\")",
-      "Bash(python3 -m json.tool)"
+      "Bash(python3 -m json.tool)",
+      "Bash(git diff app/recordings/[id]/page.tsx)",
+      "Bash(npm install hls.js)",
+      "Bash(mediamtx --help)",
+      "Read(//opt/homebrew/etc/**)"
     ],
     "additionalDirectories": [
       "/Users/mahitmehta/Desktop/Career/bet/sport-signal-ui/app/api"
