@@ -12,6 +12,7 @@ import {
   Radio,
   Square,
   Trash2,
+  TrendingUp,
   Trophy,
   Zap,
 } from "lucide-react";
@@ -100,6 +101,7 @@ interface LogEntry {
 
 const SCALE_W = 480;
 const INFER_URL = "http://localhost:8080/infer";
+const DECISION_URL = "http://localhost:8000";
 
 /* ------------------------------------------------------------------ */
 /*  PAGE                                                               */
@@ -119,6 +121,9 @@ export default function RecordingDashboard({
   const autoRunning = useRef(false);
   const rafId = useRef<number | null>(null);
   const lastCaptureTime = useRef(-1);
+  const sequenceRef = useRef(0);
+  const pregameTagsRef = useRef<{ game_tag: string; h_tag: string; a_tag: string; e_tag: string } | null>(null);
+  const marketTickersRef = useRef<string[]>([]);
 
   /* state */
   const [capturing, setCapturing] = useState(false);
@@ -131,6 +136,12 @@ export default function RecordingDashboard({
   const [period, setPeriod] = useState("1H");
   const [momentum, setMomentum] = useState("neutral 0");
   const [correction, setCorrection] = useState("");
+  const [pregameStatus, setPregameStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [tradeLoading, setTradeLoading] = useState(false);
+  const [tradeSignal, setTradeSignal] = useState<{
+    analysis: string;
+    signals: { market_ticker: string; yes_price: number | null; trend: string; action_taken: string }[];
+  } | null>(null);
 
   /* ---- helpers ---- */
 
@@ -231,6 +242,55 @@ export default function RecordingDashboard({
                   `${mCols[2]?.trim() || "neutral"} ${mCols[3]?.trim() || "0"}`
                 );
               }
+
+              // Fire live trading call with the VLM action as the event
+              const tags = pregameTagsRef.current;
+              const tickers = marketTickersRef.current;
+              if (tags && tickers.length > 0) {
+                const action = mCols[1]?.trim() || momentumStr;
+                const seqNum = sequenceRef.current++;
+                const scoreCols = scoreStr ? scoreStr.split(",") : [];
+                const clockStr = scoreCols[2]?.trim() || undefined;
+                setTradeLoading(true);
+                fetch(`${DECISION_URL}/live`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    game_tag: tags.game_tag,
+                    h_tag: tags.h_tag,
+                    a_tag: tags.a_tag,
+                    e_tag: tags.e_tag,
+                    event: action,
+                    game_time: clockStr,
+                    sequence: seqNum,
+                    market_tickers: tickers,
+                    current_time: Math.floor(Date.now() / 1000),
+                  }),
+                })
+                  .then((r) => r.json())
+                  .then((liveData) => {
+                    if (liveData.analysis) {
+                      setTradeSignal({
+                        analysis: liveData.analysis,
+                        signals: (liveData.market_signals ?? []).map(
+                          (s: {
+                            market_ticker: string;
+                            yes_price: number | null;
+                            trend: string;
+                            action_taken: string;
+                          }) => ({
+                            market_ticker: s.market_ticker,
+                            yes_price: s.yes_price ?? null,
+                            trend: s.trend,
+                            action_taken: s.action_taken ?? "HOLD",
+                          })
+                        ),
+                      });
+                    }
+                  })
+                  .catch((e) => console.error("[live] failed:", e))
+                  .finally(() => setTradeLoading(false));
+              }
             }
 
             if (data.clock_correction) {
@@ -326,7 +386,42 @@ export default function RecordingDashboard({
     };
   }, [captureFrame, fireInference]);
 
-  const startCapturing = useCallback(() => {
+  const startCapturing = useCallback(async () => {
+    setPregameStatus("loading");
+    sequenceRef.current = 0;
+
+    try {
+      const [configRes, priceRes] = await Promise.all([
+        fetch("http://localhost:8080/config").then((r) => r.json()),
+        fetch("http://localhost:8080/price-history").then((r) => r.json()),
+      ]);
+
+      if (priceRes.length > 0) {
+        marketTickersRef.current = Object.keys(priceRes[0]).filter(
+          (k) => k !== "timestamp"
+        );
+      }
+
+      const homeTeam: string = configRes.team_b?.name;
+      const awayTeam: string = configRes.team_a?.name;
+
+      if (homeTeam && awayTeam) {
+        const resp = await fetch(`${DECISION_URL}/pregame`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ home_team: homeTeam, away_team: awayTeam }),
+        });
+        if (!resp.ok) throw new Error(`Pregame failed: ${resp.status}`);
+        const tags = await resp.json();
+        pregameTagsRef.current = tags;
+      }
+
+      setPregameStatus("ready");
+    } catch (e) {
+      console.error("[pregame] failed:", e);
+      setPregameStatus("error");
+    }
+
     autoRunning.current = true;
     lastCaptureTime.current = -1;
     setCapturing(true);
@@ -348,6 +443,8 @@ export default function RecordingDashboard({
     setPeriod("1H");
     setMomentum("neutral 0");
     setCorrection("");
+    setTradeSignal(null);
+    sequenceRef.current = 0;
   }, []);
 
   const exportCSV = useCallback(() => {
@@ -631,6 +728,77 @@ export default function RecordingDashboard({
                   </span>
                 </span>
               </div>
+            </div>
+
+            {/* Trade Signal */}
+            <div className="rounded-md border border-surface-border bg-surface-light overflow-hidden">
+              <div className="flex items-center justify-between px-4 py-2 border-b border-surface-border">
+                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-widest text-accent">
+                  <TrendingUp className="w-3.5 h-3.5" />
+                  Trade Signal
+                </div>
+                {tradeLoading && (
+                  <span className="inline-block w-3 h-3 border-2 border-accent border-t-transparent rounded-full animate-spin" />
+                )}
+              </div>
+
+              {pregameStatus === "idle" && (
+                <p className="px-4 py-2.5 text-[11px] text-muted">
+                  Start capturing to activate
+                </p>
+              )}
+              {pregameStatus === "loading" && (
+                <p className="px-4 py-2.5 text-[11px] text-muted animate-pulse">
+                  Loading game memory…
+                </p>
+              )}
+              {pregameStatus === "error" && (
+                <p className="px-4 py-2.5 text-[11px] text-red-400">
+                  Pregame load failed — signals unavailable
+                </p>
+              )}
+              {pregameStatus === "ready" && !tradeSignal && (
+                <p className="px-4 py-2.5 text-[11px] text-muted">
+                  Waiting for first event…
+                </p>
+              )}
+              {tradeSignal && (
+                <div className="px-4 py-3 space-y-2.5">
+                  <p className="text-[11px] text-foreground/70 leading-relaxed line-clamp-3">
+                    {tradeSignal.analysis}
+                  </p>
+                  <div className="space-y-1.5">
+                    {tradeSignal.signals.map((sig) => (
+                      <div
+                        key={sig.market_ticker}
+                        className="flex items-center justify-between gap-2"
+                      >
+                        <span className="text-[10px] font-mono text-muted truncate">
+                          {sig.market_ticker}
+                        </span>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span
+                            className={`text-[10px] font-bold px-2 py-0.5 rounded-sm ${
+                              sig.action_taken === "HOLD"
+                                ? "bg-surface text-muted border border-surface-border"
+                                : sig.action_taken?.startsWith("BUY")
+                                  ? "bg-green-500/20 text-green-400"
+                                  : "bg-red-500/20 text-red-400"
+                            }`}
+                          >
+                            {sig.action_taken}
+                          </span>
+                          {sig.yes_price != null && (
+                            <span className="text-[10px] font-mono text-foreground/60">
+                              ${sig.yes_price.toFixed(2)}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Event log */}
