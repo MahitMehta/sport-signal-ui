@@ -425,7 +425,7 @@ function Navbar() {
           <Zap className="w-3 h-3 text-accent" />
         </div>
         <span className="text-sm font-black tracking-tight">
-          Sport<span className="text-accent">Signal</span>
+          Vision<span className="text-accent">Signal</span>
         </span>
       </div>
       <div className="flex items-center gap-5 text-xs text-muted">
@@ -874,7 +874,7 @@ export default function Home() {
       </main>
 
       <footer className="border-t border-surface-border/50 py-6 text-center text-[11px] text-muted/25 font-mono">
-        SportSignal &copy; {new Date().getFullYear()} &middot; Powered by{" "}
+        VisionSignal &copy; {new Date().getFullYear()} &middot; Powered by{" "}
         <a href="https://kalshi.com" target="_blank" rel="noopener noreferrer" className="text-accent/40 hover:text-accent transition-colors">Kalshi</a>
       </footer>
     </div>

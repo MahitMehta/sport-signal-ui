@@ -18,6 +18,7 @@ import {
   TrendingDown,
   TrendingUp,
   Minus,
+  Wallet,
   Zap,
 } from "lucide-react";
 import KalshiChart from "@/app/components/KalshiChart";
@@ -110,80 +111,42 @@ interface LogEntry {
   dim: boolean;
 }
 
+interface TradeResult {
+  order_id: string;
+  ticker: string;
+  action: string;
+  side: string;
+  contracts: number;
+  price: number;
+  buying_power: number;
+  ts: number;
+}
+
+interface Position {
+  side: "yes" | "no";
+  contracts: number;
+  avg_price: number;
+}
+
+interface PositionsData {
+  buying_power: number;
+  positions: Record<string, Position>;
+  trade_history: {
+    ts: number;
+    ticker: string;
+    action: string;
+    contracts: number;
+    price: number;
+  }[];
+}
+
 /* ------------------------------------------------------------------ */
 /*  CONSTANTS                                                          */
 /* ------------------------------------------------------------------ */
 
 const SCALE_W = 480;
 const INFER_URL = "http://localhost:8080/infer";
-const DECISION_URL = "http://localhost:8000";
-
-/* ------------------------------------------------------------------ */
-/*  ESPN PLAYS TYPE                                                     */
-/* ------------------------------------------------------------------ */
-
-interface EspnPlay {
-  wallclockTs: number;
-  period: number;
-  clockSecs: number; // seconds REMAINING in the period
-  homeScore: number;
-  awayScore: number;
-  text: string;
-  scoringPlay: boolean;
-}
-
-/** Convert a "MM:SS" game clock string to seconds remaining in the period. */
-function clockToSecs(clock: string): number {
-  const [mm, ss] = clock.split(":").map(Number);
-  return (mm || 0) * 60 + (ss || 0);
-}
-
-/** Interpolate a real-world unix timestamp from ESPN plays given current
- *  game period and clock string (e.g. "14:23" remaining in period 1). */
-function interpolateWallclock(
-  plays: EspnPlay[],
-  periodStr: string,
-  clockStr: string
-): number | undefined {
-  if (!plays.length || !clockStr || clockStr === "—") return undefined;
-
-  const period = parseInt(periodStr);
-  if (isNaN(period)) return undefined;
-
-  const clockSecs = clockToSecs(clockStr);
-  const HALF = 1200; // 20 min halves
-
-  // Game-seconds elapsed at target position
-  const targetElapsed = (period - 1) * HALF + (HALF - clockSecs);
-
-  // Compute elapsed for each play and sort
-  const ranked = plays
-    .map((p) => ({
-      ...p,
-      elapsed: (p.period - 1) * HALF + (HALF - p.clockSecs),
-    }))
-    .sort((a, b) => a.elapsed - b.elapsed);
-
-  // Find the bracket: last play at-or-before, first play after
-  let prev = ranked[0];
-  let next = ranked[ranked.length - 1];
-  for (let i = 0; i < ranked.length; i++) {
-    if (ranked[i].elapsed <= targetElapsed) prev = ranked[i];
-    else {
-      next = ranked[i];
-      break;
-    }
-  }
-
-  // Clamp to endpoints
-  if (prev.elapsed >= targetElapsed) return prev.wallclockTs;
-  if (next.elapsed <= targetElapsed) return next.wallclockTs;
-
-  // Linear interpolation between the two bracketing plays
-  const frac =
-    (targetElapsed - prev.elapsed) / (next.elapsed - prev.elapsed);
-  return Math.floor(prev.wallclockTs + frac * (next.wallclockTs - prev.wallclockTs));
-}
+const DECISION_URL = "http://localhost:8080";
 
 /* ------------------------------------------------------------------ */
 /*  SCORE ANIMATION                                                    */
@@ -450,7 +413,8 @@ function ObservationEntry({
 /* ------------------------------------------------------------------ */
 
 function getActionStyle(action: string) {
-  if (action?.startsWith("BUY"))
+  const upper = action?.toUpperCase() ?? "";
+  if (upper.startsWith("BUY") || upper.includes("BUY"))
     return {
       bg: "bg-green-500/10",
       border: "border-green-500/25",
@@ -545,7 +509,11 @@ export default function RecordingDashboard({
   const [pregameStatus, setPregameStatus] = useState<
     "idle" | "loading" | "ready" | "error"
   >("idle");
+  const chartPricesRef = useRef<Record<string, number>>({});
+  const [chartPrices, setChartPrices] = useState<Record<string, number>>({});
   const [tradeLoading, setTradeLoading] = useState(false);
+  const [tradeResults, setTradeResults] = useState<TradeResult[]>([]);
+  const [positionsData, setPositionsData] = useState<PositionsData | null>(null);
   const [tradeSignal, setTradeSignal] = useState<{
     analysis: string;
     signals: {
@@ -556,17 +524,76 @@ export default function RecordingDashboard({
     }[];
   } | null>(null);
 
-  /* ESPN plays for game-clock → real-time mapping */
-  const [espnPlays, setEspnPlays] = useState<EspnPlay[]>([]);
+  const pnl = useMemo(() => {
+    const cashFlow = tradeResults.reduce((sum, t) => {
+      const mult = t.action.toLowerCase().includes("buy") ? -1 : 1;
+      return sum + mult * t.contracts * t.price;
+    }, 0);
+    let unrealized = 0;
+    if (positionsData) {
+      for (const [ticker, pos] of Object.entries(positionsData.positions)) {
+        const currentPrice = chartPrices[ticker] / 100;
+        if (currentPrice != null) {
+          unrealized += pos.side === "yes"
+            ? pos.contracts * currentPrice
+            : pos.contracts * (1 - currentPrice);
+        }
+      }
+    }
+    return cashFlow + unrealized;
+  }, [tradeResults, positionsData, chartPrices]);
 
-  /* progressTs: real-world unix timestamp corresponding to current gameClock.
-     Drives the KalshiChart progressive reveal. */
-  const progressTs = useMemo(
-    () => interpolateWallclock(espnPlays, period, gameClock),
-    [espnPlays, period, gameClock]
+  const onPriceAtPlayhead = useCallback((prices: Record<string, number>) => {
+    chartPricesRef.current = prices;
+    setChartPrices((prev) => {
+      const keys = Object.keys(prices);
+      if (keys.length === Object.keys(prev).length && keys.every((k) => prev[k] === prices[k])) return prev;
+      return prices;
+    });
+  }, []);
+
+  /* ---- trade helpers ---- */
+
+  const executeTrade = useCallback(
+    (action: "buy" | "sell", ticker: string, side: string, contracts: number, price: number) => {
+      fetch(`${DECISION_URL}/trade/${action}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ticker, side, contracts, price }),
+      })
+        .then((r) => {
+          if (!r.ok) throw new Error(`${r.status}`);
+          return r.json();
+        })
+        .then((data) => {
+          if (!data.order_id) return;
+          const result: TradeResult = {
+            order_id: data.order_id,
+            ticker: data.ticker,
+            action: data.action,
+            side: data.side,
+            contracts: data.contracts,
+            price: data.price,
+            buying_power: data.buying_power,
+            ts: Date.now(),
+          };
+          setTradeResults((prev) => [result, ...prev]);
+          fetchPositions();
+        })
+        .catch((e) => console.error(`[trade/${action}] failed:`, e));
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
   );
 
-  /* ---- helpers ---- */
+  const fetchPositions = useCallback(() => {
+    fetch(`${DECISION_URL}/positions`)
+      .then((r) => r.json())
+      .then((data: PositionsData) => setPositionsData(data))
+      .catch((e) => console.error("[positions] failed:", e));
+  }, []);
+
+  /* ---- capture helpers ---- */
 
   const captureFrame = useCallback(() => {
     const video = videoRef.current;
@@ -707,6 +734,25 @@ export default function RecordingDashboard({
                           })
                         ),
                       });
+
+                      // Execute trades for BUY/SELL signals
+                      const signals = liveData.market_signals ?? [];
+                      for (const sig of signals) {
+                        const parts = sig.action_taken.split(/\s+/);
+                        const verb = parts[0]?.toUpperCase();
+                        if (verb !== "BUY" && verb !== "SELL") continue;
+                        const side = (parts[1] || "yes").toLowerCase();
+                        const contractsStr = parts[2]?.replace(/c$/i, "");
+                        const contracts = contractsStr ? parseInt(contractsStr, 10) : 5;
+                        const chartPrice = chartPricesRef.current[sig.market_ticker] ?? Object.values(chartPricesRef.current)[0];
+                        executeTrade(
+                          verb.toLowerCase() as "buy" | "sell",
+                          sig.market_ticker,
+                          side,
+                          Number.isNaN(contracts) ? 5 : contracts,
+                          sig.yes_price ?? chartPrice / 100,
+                        );
+                      }
                     }
                   })
                   .catch((e) => console.error("[live] failed:", e))
@@ -775,6 +821,7 @@ export default function RecordingDashboard({
           setDoneTotal((n) => n + 1);
         });
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     []
   );
 
@@ -830,6 +877,7 @@ export default function RecordingDashboard({
       }
 
       setPregameStatus("ready");
+      fetchPositions();
     } catch (e) {
       console.error("[pregame] failed:", e);
       setPregameStatus("error");
@@ -839,6 +887,7 @@ export default function RecordingDashboard({
     lastCaptureTime.current = -1;
     setCapturing(true);
     autoLoopRef.current();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const stopCapturing = useCallback(() => {
@@ -857,6 +906,8 @@ export default function RecordingDashboard({
     setMomentum("—");
     setCorrection("");
     setTradeSignal(null);
+    setTradeResults([]);
+    setPositionsData(null);
     sequenceRef.current = 0;
   }, []);
 
@@ -875,17 +926,6 @@ export default function RecordingDashboard({
     a.download = "inference_log.csv";
     a.click();
   }, [entries]);
-
-  /* Fetch ESPN plays to enable game-clock → real-time mapping */
-  useEffect(() => {
-    if (!game?.espnEventId) return;
-    fetch(`/api/espn-plays?event=${game.espnEventId}`)
-      .then((r) => r.json())
-      .then((json) => {
-        if (Array.isArray(json.plays)) setEspnPlays(json.plays);
-      })
-      .catch((e) => console.warn("[espn-plays]", e));
-  }, [game?.espnEventId]);
 
   /* cleanup on unmount */
   useEffect(() => {
@@ -987,7 +1027,7 @@ export default function RecordingDashboard({
         </Link>
 
         <span className="text-base font-bold tracking-tight absolute left-1/2 -translate-x-1/2">
-          Sport<span className="text-accent">Signal</span>
+          Vision<span className="text-accent">Signal</span>
         </span>
 
         <div className="flex items-center gap-2">
@@ -1246,28 +1286,24 @@ export default function RecordingDashboard({
               )}
             </div>
 
-            {/* Kalshi Price Chart */}
-            {game.kalshiTicker && (
-              <div>
-                <div className="flex items-center gap-2 mb-3">
-                  <TrendingUp className="w-3.5 h-3.5 text-accent" />
-                  <span className="text-[10px] font-bold uppercase tracking-widest text-accent">
-                    Market Price History
-                  </span>
-                  <span className="ml-auto text-[10px] font-mono text-muted/35 truncate max-w-[180px]">
-                    {game.kalshiTicker}
-                  </span>
-                </div>
-                <div className="rounded-xl border border-surface-border overflow-hidden bg-surface h-72">
-                  <KalshiChart
-                    ticker={game.kalshiTicker}
-                    startTs={game.kalshiStartTs}
-                    endTs={game.kalshiEndTs}
-                    progressTs={progressTs}
-                  />
-                </div>
+            {/* Price Chart */}
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                <TrendingUp className="w-3.5 h-3.5 text-accent" />
+                <span className="text-[10px] font-bold uppercase tracking-widest text-accent">
+                  Market Price History
+                </span>
               </div>
-            )}
+              <div className="rounded-xl border border-surface-border overflow-hidden bg-surface h-72">
+                <KalshiChart
+                  baseUrl={DECISION_URL}
+                  scoreA={liveScoreA}
+                  scoreB={liveScoreB}
+                  gameClock={gameClock}
+                  onPriceAtPlayhead={onPriceAtPlayhead}
+                />
+              </div>
+            </div>
           </motion.div>
 
           {/* ── RIGHT COLUMN: Trade Signal + Feed ─────────────────── */}
@@ -1415,6 +1451,110 @@ export default function RecordingDashboard({
                 )}
               </AnimatePresence>
             </div>
+
+            {/* ── POSITIONS & TRADES ── */}
+            {(positionsData || tradeResults.length > 0) && (
+              <div>
+                <div className="flex items-center gap-2 mb-3">
+                  <Wallet className="w-3.5 h-3.5 text-accent" />
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-accent">
+                    Positions & Trades
+                  </span>
+                </div>
+
+                <div className="rounded-xl border border-surface-border bg-surface overflow-hidden">
+                  {/* Summary bar */}
+                  <div className="flex items-center justify-between px-4 py-2.5 border-b border-surface-border bg-surface-light/50">
+                    {positionsData && (
+                      <span className="text-[10px] font-mono text-muted">
+                        BP{" "}
+                        <span className="text-foreground font-semibold">
+                          ${positionsData.buying_power.toFixed(2)}
+                        </span>
+                      </span>
+                    )}
+                    <span
+                      className={`text-[10px] font-bold font-mono ${
+                        pnl >= 0 ? "text-green-400" : "text-red-400"
+                      }`}
+                    >
+                      P/L {pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}
+                    </span>
+                  </div>
+
+                  {/* Open positions */}
+                  {positionsData && Object.keys(positionsData.positions).length > 0 && (
+                    <div className="border-b border-surface-border">
+                      <div className="px-4 py-1.5">
+                        <span className="text-[9px] font-bold uppercase tracking-widest text-muted/40">
+                          Open Positions
+                        </span>
+                      </div>
+                      <div className="divide-y divide-surface-border/50">
+                        {Object.entries(positionsData.positions).map(([ticker, pos]) => (
+                          <div key={ticker} className="flex items-center justify-between px-4 py-1.5">
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${
+                                  pos.side === "yes"
+                                    ? "bg-green-500/20 text-green-400"
+                                    : "bg-red-500/20 text-red-400"
+                                }`}
+                              >
+                                {pos.side}
+                              </span>
+                              <span className="text-[10px] font-mono text-muted truncate max-w-[120px]">
+                                {ticker}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-2 text-[10px] font-mono text-foreground/60">
+                              <span>&times;{pos.contracts}</span>
+                              <span>@ ${pos.avg_price.toFixed(2)}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Trade history */}
+                  {tradeResults.length > 0 && (
+                    <div>
+                      <div className="px-4 py-1.5">
+                        <span className="text-[9px] font-bold uppercase tracking-widest text-muted/40">
+                          Trade History
+                        </span>
+                      </div>
+                      <div className="max-h-28 overflow-y-auto divide-y divide-surface-border/50">
+                        {tradeResults.map((t) => (
+                          <div key={t.order_id} className="flex items-center justify-between px-4 py-1.5">
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${
+                                  t.action === "buy"
+                                    ? "bg-green-500/20 text-green-400"
+                                    : "bg-red-500/20 text-red-400"
+                                }`}
+                              >
+                                {t.action}
+                              </span>
+                              <span className="text-[10px] font-mono text-muted truncate max-w-[120px]">
+                                {t.ticker}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-2 text-[10px] font-mono text-foreground/60">
+                              <span>{t.side?.toUpperCase()}</span>
+                              <span>&times;{t?.contracts}</span>
+                              <span>${t.price?.toFixed(2)}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* ── AI OBSERVATIONS FEED ── */}
             <div className="flex flex-col">

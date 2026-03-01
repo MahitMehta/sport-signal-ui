@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "SportSignal — Live NCAA Basketball Markets",
+  title: "VisionSignal — Live NCAA Basketball Markets",
   description:
     "Track live NCAA basketball games, stream OBS feeds, and monitor Kalshi market tickers in real time.",
 };

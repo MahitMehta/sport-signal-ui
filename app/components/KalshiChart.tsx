@@ -6,234 +6,380 @@ import { useCallback, useEffect, useRef, useState } from "react";
 /*  TYPES                                                              */
 /* ------------------------------------------------------------------ */
 
-interface ForecastPoint {
-  end_period_ts: number; // unix seconds
-  numerical_forecast: number; // 0–100
+interface DataPoint {
+  ts: number; // unix ms
+  [key: string]: number;
+}
+
+interface BuySignal {
+  ts: number;
+  ticker: string;
 }
 
 interface KalshiChartProps {
-  ticker: string;
-  startTs: number;
-  endTs: number;
-  /** When set, only draw the chart up to this unix-second timestamp.
-   *  Everything beyond is shown dimmed+dashed as "future". */
-  progressTs?: number;
+  /** Base URL for the inference server, e.g. "http://localhost:8080" */
+  baseUrl: string;
+  /** Current away team score from VLM */
+  scoreA?: number;
+  /** Current home team score from VLM */
+  scoreB?: number;
+  /** Current game clock string from VLM, e.g. "14:32" */
+  gameClock?: string;
+  /** Video progress fraction 0-1 for fallback playhead positioning */
+  videoProgress?: number;
+  /** Buy signals from the trade signal agent */
+  buySignals?: BuySignal[];
+  /** Sell signals from the trade signal agent */
+  sellSignals?: BuySignal[];
+  /** Called when the playhead moves, with a map of series key -> price at the playhead */
+  onPriceAtPlayhead?: (prices: Record<string, number>) => void;
 }
 
 /* ------------------------------------------------------------------ */
 /*  CONSTANTS                                                          */
 /* ------------------------------------------------------------------ */
 
-const LINE_COLOR = "#4a9eff";
+const SERIES_COLORS = ["#4a9eff", "#CEB888", "#4aff9e", "#ffdb4a", "#c74aff"];
 const LINE_DIM = "rgba(74, 158, 255, 0.10)";
 const FUTURE_LINE = "rgba(80, 80, 80, 0.55)";
 const FUTURE_FILL = "rgba(40, 40, 40, 0.25)";
 const GRID_COLOR = "#1a1a1a";
 const LABEL_COLOR = "#555";
 const ACCENT = "#CFB991"; // gold for "now" dot
+const BUY_DOT_COLOR = "#4aff9e";
+const SELL_DOT_COLOR = "#ff4a4a";
+const DOT_RADIUS = 4;
 const PAD = { top: 16, right: 12, bottom: 28, left: 46 };
-
-/** Return a unix timestamp (seconds) for 9:00 PM EST on the same calendar day as `refTs`. */
-function get9pmEstTs(refTs: number): number {
-  const refMs = refTs * 1000;
-  const estOffsetMs = 5 * 60 * 60 * 1000; // EST is UTC-5
-  const estDate = new Date(refMs - estOffsetMs);
-  const year = estDate.getUTCFullYear();
-  const month = estDate.getUTCMonth();
-  const day = estDate.getUTCDate();
-  // 9:00 PM EST = 2:00 AM UTC next day (21 + 5 = 26 → overflows to 02:00)
-  const target = new Date(Date.UTC(year, month, day, 21 + 5, 0, 0));
-  return Math.floor(target.getTime() / 1000);
-}
 
 /* ------------------------------------------------------------------ */
 /*  COMPONENT                                                          */
 /* ------------------------------------------------------------------ */
 
 export default function KalshiChart({
-  ticker,
-  startTs,
-  endTs,
-  progressTs,
+  baseUrl,
+  scoreA,
+  scoreB,
+  gameClock,
+  videoProgress,
+  buySignals,
+  sellSignals,
+  onPriceAtPlayhead,
 }: KalshiChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const [data, setData] = useState<ForecastPoint[]>([]);
-  const [marketLabel, setMarketLabel] = useState("");
+  const [data, setData] = useState<DataPoint[]>([]);
+  const [seriesKeys, setSeriesKeys] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [hoverInfo, setHoverInfo] = useState<{
-    forecast: number;
+    values: { key: string; value: number }[];
     time: string;
+    score: string | null;
+    clock: string | null;
     x: number;
     y: number;
   } | null>(null);
 
-  /* ---- fetch ---- */
+  // Play-by-play mappings
+  const wallclockToScore = useRef<
+    { ts: number; awayScore: number; homeScore: number; clock: string }[]
+  >([]);
 
-  const fetchData = useCallback(
-    async (t: string, sTs: number, eTs: number) => {
-      setLoading(true);
-      setError(null);
-      try {
-        const res = await fetch(
-          `/api/kalshi-candles?ticker=${encodeURIComponent(t)}&range=1D&start_ts=${sTs}&end_ts=${eTs}`
-        );
-        const json = await res.json();
-        if (!res.ok) {
-          setError(json.error || "Failed to load");
-          setData([]);
-          return;
-        }
-        setMarketLabel(json.marketLabel || "");
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const points: ForecastPoint[] = (json.forecast_history || [])
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          .map((c: any) => ({
-            end_period_ts: c.end_period_ts,
-            numerical_forecast: c.numerical_forecast ?? 0,
-          }))
-          .filter((c: ForecastPoint) => c.numerical_forecast > 0)
-          .sort((a: ForecastPoint, b: ForecastPoint) => a.end_period_ts - b.end_period_ts);
+  // Playhead tracking
+  const lastScorePlayhead = useRef(0);
+  const [playheadIdx, setPlayheadIdx] = useState<number | null>(null);
 
-        if (points.length > 0) {
-          const cutoff = get9pmEstTs(points[0].end_period_ts);
-          setData(points.filter((p) => p.end_period_ts >= cutoff));
-        } else {
-          setData(points);
-        }
-      } catch {
-        setError("Network error");
-        setData([]);
-      } finally {
-        setLoading(false);
-      }
-    },
-    []
-  );
+  // Pulse animation for "now" dot
+  const pulseRef = useRef(0);
+  const rafRef = useRef<number | null>(null);
+
+  /* ---- fetch price history + play-by-play ---- */
 
   useEffect(() => {
-    if (ticker) fetchData(ticker, startTs, endTs);
-  }, [ticker, startTs, endTs, fetchData]);
+    setLoading(true);
+    setError(null);
+
+    Promise.all([
+      fetch(`${baseUrl}/price-history`).then((r) => r.json()),
+      fetch(`${baseUrl}/play-by-play`)
+        .then((r) => r.json())
+        .catch(() => []),
+    ])
+      .then(
+        ([raw, plays]: [
+          Record<string, unknown>[],
+          {
+            awayScore: number;
+            homeScore: number;
+            clock: string;
+            wallclock: string;
+          }[],
+        ]) => {
+          if (!raw || raw.length === 0) {
+            setData([]);
+            setSeriesKeys([]);
+          } else {
+            const keys = Object.keys(raw[0]).filter((k) => k !== "timestamp");
+            setSeriesKeys(keys);
+
+            const points: DataPoint[] = raw.map((d) => {
+              const entry: DataPoint = {
+                ts: new Date(d.timestamp as string).getTime(),
+              };
+              for (const key of keys) {
+                entry[key] = d[key] as number;
+              }
+              return entry;
+            });
+            setData(points);
+          }
+
+          if (plays && plays.length > 0) {
+            wallclockToScore.current = plays
+              .map((p) => ({
+                ts: new Date(p.wallclock).getTime(),
+                awayScore: p.awayScore,
+                homeScore: p.homeScore,
+                clock: p.clock,
+              }))
+              .sort((a, b) => a.ts - b.ts);
+          }
+        }
+      )
+      .catch(() => {
+        setError("Network error");
+        setData([]);
+      })
+      .finally(() => setLoading(false));
+  }, [baseUrl]);
+
+  /* ---- playhead: score-based positioning ---- */
+
+  useEffect(() => {
+    if (data.length === 0 || scoreA == null || scoreB == null) return;
+
+    const plays = wallclockToScore.current;
+    if (plays.length === 0) return;
+
+    const parseClockSec = (c: string) => {
+      const parts = c.split(":").map(Number);
+      return parts.length === 2 ? parts[0] * 60 + parts[1] : NaN;
+    };
+
+    const targetClockSec = gameClock ? parseClockSec(gameClock) : NaN;
+
+    const scoreMatches = plays.filter(
+      (p) => p.awayScore === scoreA && p.homeScore === scoreB
+    );
+
+    let best: (typeof plays)[0] | null = null;
+
+    if (scoreMatches.length > 0) {
+      if (!Number.isNaN(targetClockSec)) {
+        let bestDiff = Infinity;
+        for (const p of scoreMatches) {
+          const pSec = parseClockSec(p.clock);
+          if (Number.isNaN(pSec)) continue;
+          const diff = Math.abs(pSec - targetClockSec);
+          if (diff < bestDiff) {
+            bestDiff = diff;
+            best = p;
+          }
+        }
+      }
+      if (!best) {
+        best = scoreMatches[scoreMatches.length - 1];
+      }
+    }
+
+    if (best) {
+      let closestIdx = 0;
+      let closestDist = Math.abs(data[0].ts - best.ts);
+      for (let i = 1; i < data.length; i++) {
+        const dist = Math.abs(data[i].ts - best.ts);
+        if (dist < closestDist) {
+          closestDist = dist;
+          closestIdx = i;
+        }
+      }
+      setPlayheadIdx(closestIdx);
+      lastScorePlayhead.current = Date.now();
+    }
+  }, [scoreA, scoreB, gameClock, data]);
+
+  /* ---- playhead: fallback video-progress positioning ---- */
+
+  useEffect(() => {
+    if (videoProgress == null || videoProgress < 0 || videoProgress > 1) return;
+    if (Date.now() - lastScorePlayhead.current < 2000) return;
+    const idx = Math.min(
+      data.length - 1,
+      Math.max(0, Math.round(videoProgress * (data.length - 1)))
+    );
+    setPlayheadIdx(idx);
+  }, [videoProgress, data]);
+
+  /* ---- notify parent of price at playhead ---- */
+
+  useEffect(() => {
+    if (!onPriceAtPlayhead || playheadIdx == null || data.length === 0 || seriesKeys.length === 0)
+      return;
+    const d = data[playheadIdx];
+    const prices: Record<string, number> = {};
+    for (const key of seriesKeys) {
+      if (d[key] != null) prices[key] = d[key];
+    }
+    onPriceAtPlayhead(prices);
+  }, [playheadIdx, data, seriesKeys, onPriceAtPlayhead]);
 
   /* ---- drawing ---- */
 
-  const draw = useCallback(
-    (pTs?: number) => {
-      const canvas = canvasRef.current;
-      if (!canvas || data.length === 0) return;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
+  const draw = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || data.length === 0 || seriesKeys.length === 0) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
 
-      const dpr = window.devicePixelRatio || 1;
-      const rect = canvas.getBoundingClientRect();
-      canvas.width = rect.width * dpr;
-      canvas.height = rect.height * dpr;
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-      const w = rect.width;
-      const h = rect.height;
-      const plotW = w - PAD.left - PAD.right;
-      const plotH = h - PAD.top - PAD.bottom;
+    const w = rect.width;
+    const h = rect.height;
+    const plotW = w - PAD.left - PAD.right;
+    const plotH = h - PAD.top - PAD.bottom;
 
-      ctx.clearRect(0, 0, w, h);
+    ctx.clearRect(0, 0, w, h);
 
-      // Axes computed over ALL data so they never jump as progressTs advances
-      const minTs = data[0].end_period_ts * 1000;
-      const maxTs = data[data.length - 1].end_period_ts * 1000;
+    const minTs = data[0].ts;
+    const maxTs = data[data.length - 1].ts;
 
-      let lo = Infinity, hi = -Infinity;
+    // Compute price range over all series
+    let lo = Infinity,
+      hi = -Infinity;
+    for (const d of data) {
+      for (const key of seriesKeys) {
+        if (d[key] != null) {
+          lo = Math.min(lo, d[key]);
+          hi = Math.max(hi, d[key]);
+        }
+      }
+    }
+    if (!Number.isFinite(lo)) {
+      lo = 0;
+      hi = 100;
+    }
+    const pricePad = Math.max(2, (hi - lo) * 0.1);
+    const minPrice = Math.max(0, lo - pricePad);
+    const maxPrice = Math.min(100, hi + pricePad);
+
+    const xOf = (ts: number) =>
+      PAD.left + ((ts - minTs) / (maxTs - minTs || 1)) * plotW;
+    const yOf = (price: number) =>
+      PAD.top + (1 - (price - minPrice) / (maxPrice - minPrice || 1)) * plotH;
+
+    // ── Grid ────────────────────────────────────────────────────────
+    ctx.strokeStyle = GRID_COLOR;
+    ctx.lineWidth = 1;
+    ctx.font = "9px monospace";
+    ctx.fillStyle = LABEL_COLOR;
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+
+    const priceRange = maxPrice - minPrice;
+    const step = priceRange > 40 ? 20 : priceRange > 15 ? 10 : 5;
+    for (let p = Math.ceil(minPrice / step) * step; p <= maxPrice; p += step) {
+      const y = yOf(p);
+      ctx.beginPath();
+      ctx.moveTo(PAD.left, y);
+      ctx.lineTo(w - PAD.right, y);
+      ctx.stroke();
+      ctx.fillText(`${p}\u00a2`, PAD.left - 4, y);
+    }
+
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    const totalMs = maxTs - minTs;
+    const labelCount = Math.min(6, Math.max(2, Math.floor(plotW / 70)));
+    for (let i = 0; i <= labelCount; i++) {
+      const ts = minTs + (totalMs * i) / labelCount;
+      const d = new Date(ts);
+      const label = d.toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+      ctx.fillText(label, xOf(ts), h - PAD.bottom + 6);
+    }
+
+    // ── Draw each series with visible/future split ──────────────────
+    const splitIdx = playheadIdx;
+
+    for (let si = 0; si < seriesKeys.length; si++) {
+      const key = seriesKeys[si];
+      const color = SERIES_COLORS[si % SERIES_COLORS.length];
+
+      // Build series-specific points
+      type Pt = { ts: number; val: number };
+      const pts: Pt[] = [];
       for (const d of data) {
-        if (d.numerical_forecast > 0) {
-          lo = Math.min(lo, d.numerical_forecast);
-          hi = Math.max(hi, d.numerical_forecast);
-        }
+        if (d[key] != null) pts.push({ ts: d.ts, val: d[key] });
       }
-      if (!Number.isFinite(lo)) { lo = 0; hi = 100; }
-      const pricePad = Math.max(2, (hi - lo) * 0.1);
-      const minPrice = Math.max(0, lo - pricePad);
-      const maxPrice = Math.min(100, hi + pricePad);
+      if (pts.length === 0) continue;
 
-      const xOf = (ts: number) =>
-        PAD.left + ((ts - minTs) / (maxTs - minTs || 1)) * plotW;
-      const yOf = (price: number) =>
-        PAD.top + (1 - (price - minPrice) / (maxPrice - minPrice || 1)) * plotH;
+      // Split into visible and future at playhead index
+      let visible: Pt[];
+      let future: Pt[];
 
-      // ── Grid ────────────────────────────────────────────────────────
-      ctx.strokeStyle = GRID_COLOR;
-      ctx.lineWidth = 1;
-      ctx.font = "9px monospace";
-      ctx.fillStyle = LABEL_COLOR;
-      ctx.textAlign = "right";
-      ctx.textBaseline = "middle";
+      if (splitIdx != null) {
+        const splitTs = data[splitIdx].ts;
+        visible = pts.filter((p) => p.ts <= splitTs);
+        future = pts.filter((p) => p.ts > splitTs);
+      } else {
+        visible = pts;
+        future = [];
+      }
 
-      const priceRange = maxPrice - minPrice;
-      const step = priceRange > 40 ? 20 : priceRange > 15 ? 10 : 5;
-      for (let p = Math.ceil(minPrice / step) * step; p <= maxPrice; p += step) {
-        const y = yOf(p);
+      // Area fill helper
+      const fillArea = (seg: Pt[], fillStyle: string | CanvasGradient) => {
+        if (seg.length < 2) return;
         ctx.beginPath();
-        ctx.moveTo(PAD.left, y);
-        ctx.lineTo(w - PAD.right, y);
-        ctx.stroke();
-        ctx.fillText(p + "%", PAD.left - 4, y);
-      }
-
-      ctx.textAlign = "center";
-      ctx.textBaseline = "top";
-      const totalMs = maxTs - minTs;
-      const labelCount = Math.min(6, Math.max(2, Math.floor(plotW / 70)));
-      for (let i = 0; i <= labelCount; i++) {
-        const ts = minTs + (totalMs * i) / labelCount;
-        const d = new Date(ts);
-        const label = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-        ctx.fillText(label, xOf(ts), h - PAD.bottom + 6);
-      }
-
-      // ── Split data at progressTs ────────────────────────────────────
-      const progressTsMs = pTs !== undefined ? pTs * 1000 : undefined;
-      const visible =
-        progressTsMs !== undefined
-          ? data.filter((d) => d.end_period_ts * 1000 <= progressTsMs && d.numerical_forecast > 0)
-          : data.filter((d) => d.numerical_forecast > 0);
-      const future =
-        progressTsMs !== undefined
-          ? data.filter((d) => d.end_period_ts * 1000 > progressTsMs && d.numerical_forecast > 0)
-          : [];
-
-      // ── Helper: draw area fill ──────────────────────────────────────
-      const fillArea = (pts: ForecastPoint[], fillStyle: string | CanvasGradient) => {
-        if (pts.length < 2) return;
-        ctx.beginPath();
-        ctx.moveTo(xOf(pts[0].end_period_ts * 1000), yOf(pts[0].numerical_forecast));
-        for (let i = 1; i < pts.length; i++) {
-          ctx.lineTo(xOf(pts[i].end_period_ts * 1000), yOf(pts[i].numerical_forecast));
+        ctx.moveTo(xOf(seg[0].ts), yOf(seg[0].val));
+        for (let i = 1; i < seg.length; i++) {
+          ctx.lineTo(xOf(seg[i].ts), yOf(seg[i].val));
         }
-        const last = pts[pts.length - 1];
-        ctx.lineTo(xOf(last.end_period_ts * 1000), yOf(minPrice));
-        ctx.lineTo(xOf(pts[0].end_period_ts * 1000), yOf(minPrice));
+        const last = seg[seg.length - 1];
+        ctx.lineTo(xOf(last.ts), yOf(minPrice));
+        ctx.lineTo(xOf(seg[0].ts), yOf(minPrice));
         ctx.closePath();
         ctx.fillStyle = fillStyle;
         ctx.fill();
       };
 
-      // ── Helper: draw stroke line ────────────────────────────────────
-      const strokeLine = (pts: ForecastPoint[], style: string, width: number, dashed = false) => {
-        if (pts.length === 0) return;
+      // Stroke helper
+      const strokeLine = (
+        seg: Pt[],
+        style: string,
+        width: number,
+        dashed = false
+      ) => {
+        if (seg.length === 0) return;
         ctx.strokeStyle = style;
         ctx.lineWidth = width;
         ctx.lineJoin = "round";
         if (dashed) ctx.setLineDash([4, 5]);
         ctx.beginPath();
-        ctx.moveTo(xOf(pts[0].end_period_ts * 1000), yOf(pts[0].numerical_forecast));
-        for (let i = 1; i < pts.length; i++) {
-          ctx.lineTo(xOf(pts[i].end_period_ts * 1000), yOf(pts[i].numerical_forecast));
+        ctx.moveTo(xOf(seg[0].ts), yOf(seg[0].val));
+        for (let i = 1; i < seg.length; i++) {
+          ctx.lineTo(xOf(seg[i].ts), yOf(seg[i].val));
         }
         ctx.stroke();
         if (dashed) ctx.setLineDash([]);
       };
 
-      // ── Draw future (dim, dashed) ───────────────────────────────────
+      // Draw future (dim, dashed)
       if (future.length > 0) {
         const lastVis = visible[visible.length - 1];
         const stitched = lastVis ? [lastVis, ...future] : future;
@@ -241,41 +387,107 @@ export default function KalshiChart({
         strokeLine(stitched, FUTURE_LINE, 1, true);
       }
 
-      // ── Draw visible (full color) ───────────────────────────────────
+      // Draw visible (full color)
       if (visible.length > 0) {
-        const grad = ctx.createLinearGradient(0, PAD.top, 0, h - PAD.bottom);
-        grad.addColorStop(0, LINE_DIM);
-        grad.addColorStop(1, "rgba(0,0,0,0)");
-        fillArea(visible, grad);
-        strokeLine(visible, LINE_COLOR, 1.5);
+        // Only first series gets area fill gradient
+        if (si === 0) {
+          const grad = ctx.createLinearGradient(0, PAD.top, 0, h - PAD.bottom);
+          grad.addColorStop(0, LINE_DIM);
+          grad.addColorStop(1, "rgba(0,0,0,0)");
+          fillArea(visible, grad);
+        }
+        strokeLine(visible, color, 1.5);
       }
 
-      // ── Current-position indicator (progressive mode) ───────────────
-      if (progressTsMs !== undefined && visible.length > 0) {
-        const curr = visible[visible.length - 1];
-        const cx = xOf(curr.end_period_ts * 1000);
-        const cy = yOf(curr.numerical_forecast);
-
-        // Vertical dashed "now" line
-        ctx.strokeStyle = "rgba(207,185,145,0.22)";
-        ctx.lineWidth = 1;
-        ctx.setLineDash([2, 5]);
+      // End dot when no playhead and no future
+      if (splitIdx == null && visible.length > 0 && future.length === 0) {
+        const last = visible[visible.length - 1];
+        const lx = xOf(last.ts);
+        const ly = yOf(last.val);
         ctx.beginPath();
-        ctx.moveTo(cx, PAD.top);
-        ctx.lineTo(cx, h - PAD.bottom);
-        ctx.stroke();
-        ctx.setLineDash([]);
+        ctx.arc(lx, ly, 3, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+      }
+    }
 
-        // Outer glow ring
+    // ── Trade signal dots ───────────────────────────────────────────
+    const allSignals: { sig: BuySignal; color: string }[] = [];
+    if (buySignals)
+      for (const sig of buySignals)
+        allSignals.push({ sig, color: BUY_DOT_COLOR });
+    if (sellSignals)
+      for (const sig of sellSignals)
+        allSignals.push({ sig, color: SELL_DOT_COLOR });
+
+    if (allSignals.length > 0 && data.length > 0) {
+      for (const { sig, color } of allSignals) {
+        if (sig.ts < minTs || sig.ts > maxTs) continue;
+        let closestIdx = 0;
+        let closestDist = Math.abs(data[0].ts - sig.ts);
+        for (let i = 1; i < data.length; i++) {
+          const dist = Math.abs(data[i].ts - sig.ts);
+          if (dist < closestDist) {
+            closestDist = dist;
+            closestIdx = i;
+          }
+        }
+        const d = data[closestIdx];
+        const x = xOf(d.ts);
+        const keyIdx = seriesKeys.indexOf(sig.ticker);
+        const key = keyIdx >= 0 ? seriesKeys[keyIdx] : seriesKeys[0];
+        const val = d[key];
+        if (val == null) continue;
+        const y = yOf(val);
+
+        // Outer glow
         ctx.beginPath();
-        ctx.arc(cx, cy, 8, 0, Math.PI * 2);
-        ctx.fillStyle = "rgba(207,185,145,0.10)";
+        ctx.arc(x, y, DOT_RADIUS + 2, 0, Math.PI * 2);
+        ctx.fillStyle = `${color}33`;
         ctx.fill();
 
-        // Mid ring
+        // Solid dot
+        ctx.beginPath();
+        ctx.arc(x, y, DOT_RADIUS, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+      }
+    }
+
+    // ── Current-position indicator (gold dot + vertical line) ───────
+    if (splitIdx != null && data.length > 0) {
+      const d = data[splitIdx];
+      const cx = xOf(d.ts);
+      // Use first series for the gold dot position
+      const primaryKey = seriesKeys[0];
+      const primaryVal = d[primaryKey];
+
+      // Vertical dashed "now" line
+      ctx.strokeStyle = "rgba(207,185,145,0.22)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 5]);
+      ctx.beginPath();
+      ctx.moveTo(cx, PAD.top);
+      ctx.lineTo(cx, h - PAD.bottom);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      if (primaryVal != null) {
+        const cy = yOf(primaryVal);
+        const pulse = pulseRef.current; // 0 → 1
+
+        // Animated pulse ring (expands and fades out)
+        const pulseRadius = 4 + pulse * 12;
+        const pulseAlpha = 0.35 * (1 - pulse);
+        ctx.beginPath();
+        ctx.arc(cx, cy, pulseRadius, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(207,185,145,${pulseAlpha})`;
+        ctx.fill();
+
+        // Static mid ring
         ctx.beginPath();
         ctx.arc(cx, cy, 5, 0, Math.PI * 2);
-        ctx.fillStyle = "rgba(207,185,145,0.20)";
+        ctx.fillStyle = "rgba(207,185,145,0.18)";
         ctx.fill();
 
         // Core dot (gold)
@@ -285,32 +497,36 @@ export default function KalshiChart({
         ctx.fill();
 
         // Price label next to dot
-        const label = `${curr.numerical_forecast.toFixed(1)}%`;
+        const label = `${primaryVal.toFixed(1)}\u00a2`;
         ctx.font = "bold 9px monospace";
         ctx.fillStyle = ACCENT;
         ctx.textAlign = cx > w - 80 ? "right" : "left";
         ctx.textBaseline = "middle";
         ctx.fillText(label, cx + (cx > w - 80 ? -10 : 10), cy);
-      } else if (visible.length > 0 && future.length === 0) {
-        // Full chart — original end dot
-        const last = visible[visible.length - 1];
-        const lx = xOf(last.end_period_ts * 1000);
-        const ly = yOf(last.numerical_forecast);
-        ctx.beginPath();
-        ctx.arc(lx, ly, 3, 0, Math.PI * 2);
-        ctx.fillStyle = LINE_COLOR;
-        ctx.fill();
       }
-    },
-    [data]
-  );
+    }
+  }, [data, seriesKeys, playheadIdx, buySignals, sellSignals]);
 
   useEffect(() => {
-    draw(progressTs);
-    const handler = () => draw(progressTs);
+    let startTime: number | null = null;
+    const PULSE_DURATION = 1500; // ms per cycle
+
+    const tick = (time: number) => {
+      if (startTime === null) startTime = time;
+      pulseRef.current = ((time - startTime) % PULSE_DURATION) / PULSE_DURATION;
+      draw();
+      rafRef.current = requestAnimationFrame(tick);
+    };
+
+    rafRef.current = requestAnimationFrame(tick);
+
+    const handler = () => draw();
     window.addEventListener("resize", handler);
-    return () => window.removeEventListener("resize", handler);
-  }, [draw, progressTs]);
+    return () => {
+      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+      window.removeEventListener("resize", handler);
+    };
+  }, [draw]);
 
   /* ---- hover ---- */
 
@@ -329,39 +545,86 @@ export default function KalshiChart({
         return;
       }
 
-      const idx = Math.min(data.length - 1, Math.max(0, Math.round(frac * (data.length - 1))));
+      const idx = Math.min(
+        data.length - 1,
+        Math.max(0, Math.round(frac * (data.length - 1)))
+      );
       const d = data[idx];
-      const ts = new Date(d.end_period_ts * 1000);
-      const timeStr = ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const ts = new Date(d.ts);
+      const timeStr = ts.toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
 
-      setHoverInfo({ forecast: d.numerical_forecast, time: timeStr, x: mx, y: e.clientY - rect.top });
+      // Find nearest score from play-by-play
+      let scoreStr: string | null = null;
+      let clockStr: string | null = null;
+      const plays = wallclockToScore.current;
+      if (plays.length > 0) {
+        let lo = 0,
+          hi = plays.length - 1;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (plays[mid].ts < d.ts) lo = mid + 1;
+          else hi = mid;
+        }
+        let nearest = plays[lo];
+        if (
+          lo > 0 &&
+          Math.abs(plays[lo - 1].ts - d.ts) < Math.abs(plays[lo].ts - d.ts)
+        ) {
+          nearest = plays[lo - 1];
+        }
+        scoreStr = `${nearest.awayScore} \u2013 ${nearest.homeScore}`;
+        clockStr = nearest.clock;
+      }
+
+      setHoverInfo({
+        values: seriesKeys.map((key) => ({ key, value: d[key] })),
+        time: timeStr,
+        score: scoreStr,
+        clock: clockStr,
+        x: mx,
+        y: e.clientY - rect.top,
+      });
     },
-    [data]
+    [data, seriesKeys]
   );
 
   /* ---- render ---- */
 
-  const isProgressing = progressTs !== undefined && data.length > 0;
-  const visibleCount = isProgressing
-    ? data.filter((d) => d.end_period_ts <= (progressTs ?? 0)).length
-    : data.length;
-  const currentPrice = isProgressing
-    ? (data.filter((d) => d.end_period_ts <= (progressTs ?? 0)).slice(-1)[0]?.numerical_forecast ?? null)
-    : null;
+  const isProgressing = playheadIdx != null && data.length > 0;
+  const visibleCount = isProgressing ? playheadIdx + 1 : data.length;
+  const currentPrice =
+    isProgressing && seriesKeys.length > 0
+      ? (data[playheadIdx][seriesKeys[0]] ?? null)
+      : null;
 
   return (
     <div className="flex flex-col gap-2 h-full">
       {/* Header row */}
-      <div className="flex items-center gap-3 text-[10px] font-mono text-muted">
-        <span className="flex items-center gap-1">
-          <span className="w-2.5 h-0.5 rounded-full inline-block" style={{ background: LINE_COLOR }} />
-          Forecast
-        </span>
-        {marketLabel && <span className="text-muted/60 ml-1">{marketLabel}</span>}
+      <div className="flex items-center gap-3 text-[10px] font-mono text-muted flex-wrap">
+        {seriesKeys.map((key, i) => (
+          <span key={key} className="flex items-center gap-1">
+            <span
+              className="w-2.5 h-0.5 rounded-full inline-block"
+              style={{
+                background: SERIES_COLORS[i % SERIES_COLORS.length],
+              }}
+            />
+            <span
+              style={{ color: SERIES_COLORS[i % SERIES_COLORS.length] }}
+            >
+              {key}
+            </span>
+          </span>
+        ))}
         {isProgressing && currentPrice !== null && (
           <span className="ml-auto font-bold" style={{ color: ACCENT }}>
-            {currentPrice.toFixed(1)}%
-            <span className="text-muted/40 font-normal ml-1.5">· {visibleCount}/{data.length} pts</span>
+            {currentPrice.toFixed(1)}&cent;
+            <span className="text-muted/40 font-normal ml-1.5">
+              &middot; {visibleCount}/{data.length} pts
+            </span>
           </span>
         )}
       </div>
@@ -397,14 +660,40 @@ export default function KalshiChart({
         {/* Tooltip */}
         {hoverInfo && (
           <div
-            className="absolute pointer-events-none z-20 bg-surface-light border border-surface-border rounded px-2 py-1 text-[10px] font-mono shadow-lg"
+            className="absolute pointer-events-none z-20 bg-surface-light border border-surface-border rounded px-2 py-1 text-[10px] font-mono shadow-lg whitespace-nowrap"
             style={{
-              left: Math.min(hoverInfo.x + 10, (containerRef.current?.clientWidth ?? 300) - 120),
-              top: Math.max(hoverInfo.y - 30, 4),
+              left: Math.min(
+                hoverInfo.x + 10,
+                (containerRef.current?.clientWidth ?? 300) - 180
+              ),
+              top: Math.max(hoverInfo.y - 40, 4),
             }}
           >
-            <span style={{ color: LINE_COLOR }} className="font-bold">{hoverInfo.forecast}%</span>
-            <span className="text-muted ml-2">{hoverInfo.time}</span>
+            <div className="flex items-center gap-2">
+              {hoverInfo.values.map((v, i) => (
+                <span key={v.key}>
+                  <span
+                    style={{
+                      color: SERIES_COLORS[i % SERIES_COLORS.length],
+                    }}
+                    className="font-bold"
+                  >
+                    {v.value?.toFixed(1)}&cent;
+                  </span>
+                </span>
+              ))}
+              <span className="text-muted">{hoverInfo.time}</span>
+            </div>
+            {(hoverInfo.score || hoverInfo.clock) && (
+              <div className="flex items-center gap-2 text-foreground/70 mt-0.5">
+                {hoverInfo.score && (
+                  <span className="font-bold">{hoverInfo.score}</span>
+                )}
+                {hoverInfo.clock && (
+                  <span className="text-muted">{hoverInfo.clock}</span>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -412,7 +701,9 @@ export default function KalshiChart({
         {isProgressing && (
           <div className="absolute top-2 right-2 flex items-center gap-1 bg-black/60 backdrop-blur-sm rounded px-1.5 py-0.5 border border-accent/20">
             <span className="w-1 h-1 rounded-full bg-accent pulse-live" />
-            <span className="text-[9px] font-bold text-accent tracking-wider">LIVE</span>
+            <span className="text-[9px] font-bold text-accent tracking-wider">
+              LIVE
+            </span>
           </div>
         )}
       </div>
