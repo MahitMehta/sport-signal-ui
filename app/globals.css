@@ -70,3 +70,15 @@ body {
 .pulse-live {
   animation: pulse-live 1.5s ease-in-out infinite;
 }
+
+/* Delta badge rise */
+@keyframes delta-rise {
+  0%   { opacity: 1;   transform: translateY(0)   scale(1);    }
+  60%  { opacity: 0.9; transform: translateY(-32px) scale(0.9); }
+  100% { opacity: 0;   transform: translateY(-56px) scale(0.7); }
+}
+
+.delta-rise {
+  animation: delta-rise 1.3s cubic-bezier(0.2, 0, 0.1, 1) forwards;
+  pointer-events: none;
+}

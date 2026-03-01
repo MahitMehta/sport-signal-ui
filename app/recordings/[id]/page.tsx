@@ -1,21 +1,23 @@
 "use client";
 
-import { use, useCallback, useEffect, useRef, useState } from "react";
+import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import Link from "next/link";
 import Hls from "hls.js";
 import {
   Activity,
   ArrowLeft,
-  Calendar,
+  ChevronRight,
+  Code2,
   Download,
   Play,
   Radio,
   Square,
   Trash2,
+  TrendingDown,
   TrendingUp,
-  Trophy,
+  Minus,
   Zap,
 } from "lucide-react";
 import KalshiChart from "@/app/components/KalshiChart";
@@ -39,6 +41,7 @@ interface Game {
   kalshiUrl: string;
   date: string;
   videoSrc?: string;
+  espnEventId?: string; // ESPN game summary event ID
 }
 
 const RECORDINGS: Record<string, Game> = {
@@ -58,6 +61,7 @@ const RECORDINGS: Record<string, Game> = {
       "https://kalshi.com/markets/kxncaambgame/mens-college-basketball-mens-game/kxncaambgame-26feb09arizku",
     date: "Feb 9, 2026",
     videoSrc: "/recordings/26feb09arizku.mp4",
+    espnEventId: "401820818",
   },
   "7": {
     id: "7",
@@ -115,6 +119,366 @@ const INFER_URL = "http://localhost:8080/infer";
 const DECISION_URL = "http://localhost:8000";
 
 /* ------------------------------------------------------------------ */
+/*  ESPN PLAYS TYPE                                                     */
+/* ------------------------------------------------------------------ */
+
+interface EspnPlay {
+  wallclockTs: number;
+  period: number;
+  clockSecs: number; // seconds REMAINING in the period
+  homeScore: number;
+  awayScore: number;
+  text: string;
+  scoringPlay: boolean;
+}
+
+/** Convert a "MM:SS" game clock string to seconds remaining in the period. */
+function clockToSecs(clock: string): number {
+  const [mm, ss] = clock.split(":").map(Number);
+  return (mm || 0) * 60 + (ss || 0);
+}
+
+/** Interpolate a real-world unix timestamp from ESPN plays given current
+ *  game period and clock string (e.g. "14:23" remaining in period 1). */
+function interpolateWallclock(
+  plays: EspnPlay[],
+  periodStr: string,
+  clockStr: string
+): number | undefined {
+  if (!plays.length || !clockStr || clockStr === "—") return undefined;
+
+  const period = parseInt(periodStr);
+  if (isNaN(period)) return undefined;
+
+  const clockSecs = clockToSecs(clockStr);
+  const HALF = 1200; // 20 min halves
+
+  // Game-seconds elapsed at target position
+  const targetElapsed = (period - 1) * HALF + (HALF - clockSecs);
+
+  // Compute elapsed for each play and sort
+  const ranked = plays
+    .map((p) => ({
+      ...p,
+      elapsed: (p.period - 1) * HALF + (HALF - p.clockSecs),
+    }))
+    .sort((a, b) => a.elapsed - b.elapsed);
+
+  // Find the bracket: last play at-or-before, first play after
+  let prev = ranked[0];
+  let next = ranked[ranked.length - 1];
+  for (let i = 0; i < ranked.length; i++) {
+    if (ranked[i].elapsed <= targetElapsed) prev = ranked[i];
+    else {
+      next = ranked[i];
+      break;
+    }
+  }
+
+  // Clamp to endpoints
+  if (prev.elapsed >= targetElapsed) return prev.wallclockTs;
+  if (next.elapsed <= targetElapsed) return next.wallclockTs;
+
+  // Linear interpolation between the two bracketing plays
+  const frac =
+    (targetElapsed - prev.elapsed) / (next.elapsed - prev.elapsed);
+  return Math.floor(prev.wallclockTs + frac * (next.wallclockTs - prev.wallclockTs));
+}
+
+/* ------------------------------------------------------------------ */
+/*  SCORE ANIMATION                                                    */
+/* ------------------------------------------------------------------ */
+
+/** One digit slot — old digit exits up, new enters from below (slot machine). */
+function ScoreDigit({ char, highlight }: { char: string; highlight: boolean }) {
+  return (
+    <span
+      className="relative inline-block overflow-hidden"
+      style={{ height: "1em", minWidth: char === " " ? "0.35em" : "0.6em" }}
+    >
+      <AnimatePresence initial={false}>
+        <motion.span
+          key={char}
+          initial={{ y: "100%", opacity: 0.5 }}
+          animate={{ y: "0%", opacity: 1 }}
+          exit={{ y: "-100%", opacity: 0.5 }}
+          transition={{ type: "spring", stiffness: 500, damping: 38, mass: 0.75 }}
+          className={`absolute inset-0 flex items-center justify-center font-mono font-black tabular-nums leading-none select-none ${
+            highlight ? "text-accent" : "text-foreground/35"
+          }`}
+        >
+          {char}
+        </motion.span>
+      </AnimatePresence>
+    </span>
+  );
+}
+
+/** Full animated score number with per-digit roll + floating +N delta badge.
+ *  Pads to 2 digits so key indices stay stable (avoids phantom "0" on rollover). */
+function AnimatedScore({
+  value,
+  highlight,
+}: {
+  value: number;
+  highlight: boolean;
+}) {
+  const prevRef = useRef(value);
+  const [deltas, setDeltas] = useState<{ id: number; val: number }[]>([]);
+
+  useEffect(() => {
+    if (value > prevRef.current) {
+      const diff = value - prevRef.current;
+      const id = Date.now() + Math.random();
+      setDeltas((d) => [...d, { id, val: diff }]);
+      const t = setTimeout(
+        () => setDeltas((d) => d.filter((x) => x.id !== id)),
+        1600
+      );
+      return () => clearTimeout(t);
+    }
+    prevRef.current = value;
+  }, [value]);
+
+  // Pad to 2 chars so digit slot keys are stable across 1-digit → 2-digit transitions.
+  // Leading zero slot is hidden when value < 10 via opacity so it doesn't show.
+  const padded = String(value).padStart(2, "0");
+  const chars = padded.split("");
+  const hideLeading = value < 10; // hide the "0" pad when score is a single digit
+
+  return (
+    <div className="relative inline-flex items-center text-5xl sm:text-6xl">
+      {chars.map((char, i) => (
+        <span key={i} className={i === 0 && hideLeading ? "opacity-0 w-0 overflow-hidden" : ""}>
+          <ScoreDigit char={char} highlight={highlight} />
+        </span>
+      ))}
+
+      {/* Floating +N badges */}
+      {deltas.map(({ id, val }) => (
+        <span
+          key={id}
+          className="delta-rise absolute -top-2 left-1/2 -translate-x-1/2 text-base sm:text-lg font-black text-accent whitespace-nowrap"
+          style={{ textShadow: "0 0 16px rgba(207,185,145,0.9)" }}
+        >
+          +{val}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  OBSERVATION PARSING                                                */
+/* ------------------------------------------------------------------ */
+
+interface ParsedObs {
+  description: string | null;
+  team: "A" | "B" | null;
+  magnitude: number | null;
+  eventType: string | null;
+  scoreA: number | null;
+  scoreB: number | null;
+  clock: string | null;
+  period: string | null;
+}
+
+function parseObservation(text: string): ParsedObs {
+  const result: ParsedObs = {
+    description: null,
+    team: null,
+    magnitude: null,
+    eventType: null,
+    scoreA: null,
+    scoreB: null,
+    clock: null,
+    period: null,
+  };
+
+  for (const line of text.trim().split("\n")) {
+    if (line.startsWith("score: ")) {
+      const cols = line.slice(7).split(",");
+      const a = parseInt(cols[0]);
+      const b = parseInt(cols[1]);
+      if (!isNaN(a)) result.scoreA = a;
+      if (!isNaN(b)) result.scoreB = b;
+      result.clock = cols[2]?.trim() || null;
+      const per = parseInt(cols[3]);
+      if (!isNaN(per)) result.period = `${per}H`;
+    } else if (line.trim()) {
+      // Momentum CSV: "53.0,Arizona scores on fast break,team_A,5,quick transition"
+      const cols = line.split(",");
+      if (cols.length >= 2 && !isNaN(parseFloat(cols[0]))) {
+        result.description = cols[1]?.trim() || null;
+        const t = cols[2]?.trim();
+        result.team = t === "team_A" ? "A" : t === "team_B" ? "B" : null;
+        const mag = parseInt(cols[3]);
+        result.magnitude = isNaN(mag) ? null : Math.min(5, Math.max(1, mag));
+        result.eventType = cols[4]?.trim().replace(/_/g, " ") || null;
+      } else {
+        result.description = line.trim();
+      }
+    }
+  }
+  return result;
+}
+
+function ObservationEntry({
+  entry,
+  teamAShort,
+  teamBShort,
+  isLatest,
+  rawMode,
+}: {
+  entry: LogEntry;
+  teamAShort: string;
+  teamBShort: string;
+  isLatest: boolean;
+  rawMode: boolean;
+}) {
+  if (entry.pending) {
+    return (
+      <div className="flex items-center gap-2.5 px-4 py-3 border-b border-surface-border/40">
+        <span className="w-2.5 h-2.5 border border-accent border-t-transparent rounded-full animate-spin shrink-0" />
+        <span className="text-[11px] text-muted/40">Analyzing frame…</span>
+      </div>
+    );
+  }
+
+  if (entry.error) {
+    return (
+      <div className="flex gap-3 px-4 py-3 border-b border-surface-border/40">
+        <div className="w-0.5 bg-red-500/50 rounded-full shrink-0 self-stretch" />
+        <div className="flex-1 min-w-0">
+          <p className="text-[11px] text-red-400/80 leading-snug">{entry.text}</p>
+          <p className="text-[10px] text-muted/25 font-mono mt-0.5">{entry.ts}</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Hide dim "no data" entries — they clutter without adding value
+  if (entry.dim) return null;
+
+  // Raw mode — show the unformatted text from the model
+  if (rawMode) {
+    return (
+      <div
+        className={`px-4 py-3 border-b border-surface-border/30 last:border-0 ${
+          isLatest ? "bg-surface-light/25" : ""
+        }`}
+      >
+        <pre className="text-[10px] font-mono text-muted/60 whitespace-pre-wrap break-all leading-relaxed">
+          {entry.text}
+        </pre>
+        <p className="text-[9px] font-mono text-muted/25 mt-1">{entry.ts}</p>
+      </div>
+    );
+  }
+
+  const obs = parseObservation(entry.text);
+  const teamLabel =
+    obs.team === "A" ? teamAShort : obs.team === "B" ? teamBShort : null;
+
+  const description = obs.description
+    ? obs.description.charAt(0).toUpperCase() + obs.description.slice(1)
+    : null;
+
+  const eventLabel = obs.eventType
+    ? obs.eventType.charAt(0).toUpperCase() + obs.eventType.slice(1)
+    : null;
+
+  return (
+    <div
+      className={`flex gap-3 px-4 py-3 border-b border-surface-border/30 last:border-0 ${
+        isLatest ? "bg-surface-light/25" : ""
+      }`}
+    >
+      <div className="w-0.5 rounded-full shrink-0 self-stretch bg-green-500/35" />
+      <div className="flex-1 min-w-0">
+        {/* Main description */}
+        {description && (
+          <p className="text-[12px] text-foreground/80 leading-snug mb-1.5">
+            {description}
+          </p>
+        )}
+
+        {/* Metadata chips */}
+        <div className="flex items-center flex-wrap gap-x-2 gap-y-1">
+          {teamLabel && (
+            <span className="text-[10px] font-bold font-mono px-1.5 py-0.5 rounded-sm bg-accent/10 text-accent border border-accent/15">
+              {teamLabel}
+            </span>
+          )}
+          {eventLabel && (
+            <span className="text-[10px] text-muted/50 capitalize">{eventLabel}</span>
+          )}
+          {obs.magnitude !== null && (
+            <span className="flex items-center gap-[2px]" title={`Intensity ${obs.magnitude}/5`}>
+              {[1, 2, 3, 4, 5].map((i) => (
+                <span
+                  key={i}
+                  className={`inline-block w-1 h-1 rounded-full ${
+                    i <= obs.magnitude! ? "bg-accent/70" : "bg-muted/15"
+                  }`}
+                />
+              ))}
+            </span>
+          )}
+
+          {/* Score + clock — right-aligned */}
+          {obs.scoreA !== null && obs.scoreB !== null && (
+            <span className="ml-auto text-[10px] font-mono text-muted/35">
+              {obs.scoreA}–{obs.scoreB}
+              {obs.clock ? ` · ${obs.clock}` : ""}
+              {obs.period ? ` · ${obs.period}` : ""}
+            </span>
+          )}
+          {obs.scoreA === null && (
+            <span className="ml-auto text-[10px] font-mono text-muted/25">
+              {entry.ts}
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  HELPERS                                                            */
+/* ------------------------------------------------------------------ */
+
+function getActionStyle(action: string) {
+  if (action?.startsWith("BUY"))
+    return {
+      bg: "bg-green-500/10",
+      border: "border-green-500/25",
+      text: "text-green-400",
+      badge: "bg-green-500/20 border-green-500/30 text-green-400",
+      glow: "shadow-[0_0_40px_rgba(34,197,94,0.08)]",
+      icon: <TrendingUp className="w-5 h-5" />,
+    };
+  if (action === "SELL" || action?.startsWith("SELL"))
+    return {
+      bg: "bg-red-500/10",
+      border: "border-red-500/25",
+      text: "text-red-400",
+      badge: "bg-red-500/20 border-red-500/30 text-red-400",
+      glow: "shadow-[0_0_40px_rgba(239,68,68,0.08)]",
+      icon: <TrendingDown className="w-5 h-5" />,
+    };
+  return {
+    bg: "bg-surface-light",
+    border: "border-surface-border",
+    text: "text-muted",
+    badge: "bg-surface border-surface-border text-muted",
+    glow: "",
+    icon: <Minus className="w-5 h-5" />,
+  };
+}
+
+/* ------------------------------------------------------------------ */
 /*  PAGE                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -142,7 +506,11 @@ export default function RecordingDashboard({
         kalshiStartTs: 0,
         kalshiEndTs: 0,
         kalshiUrl: "",
-        date: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
+        date: new Date().toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+        }),
       }
     : RECORDINGS[id];
 
@@ -154,26 +522,49 @@ export default function RecordingDashboard({
   const rafId = useRef<number | null>(null);
   const lastCaptureTime = useRef(-1);
   const sequenceRef = useRef(0);
-  const pregameTagsRef = useRef<{ game_tag: string; h_tag: string; a_tag: string; e_tag: string } | null>(null);
+  const pregameTagsRef = useRef<{
+    game_tag: string;
+    h_tag: string;
+    a_tag: string;
+    e_tag: string;
+  } | null>(null);
   const marketTickersRef = useRef<string[]>([]);
 
   /* state */
   const [capturing, setCapturing] = useState(false);
   const [entries, setEntries] = useState<LogEntry[]>([]);
+  const [rawMode, setRawMode] = useState(false);
   const [inflight, setInflight] = useState(0);
   const [doneTotal, setDoneTotal] = useState(0);
   const [liveScoreA, setLiveScoreA] = useState(0);
   const [liveScoreB, setLiveScoreB] = useState(0);
-  const [gameClock, setGameClock] = useState("00:00");
-  const [period, setPeriod] = useState("1H");
-  const [momentum, setMomentum] = useState("neutral 0");
+  const [gameClock, setGameClock] = useState("—");
+  const [period, setPeriod] = useState("—");
+  const [momentum, setMomentum] = useState("—");
   const [correction, setCorrection] = useState("");
-  const [pregameStatus, setPregameStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [pregameStatus, setPregameStatus] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
   const [tradeLoading, setTradeLoading] = useState(false);
   const [tradeSignal, setTradeSignal] = useState<{
     analysis: string;
-    signals: { market_ticker: string; yes_price: number | null; trend: string; action_taken: string }[];
+    signals: {
+      market_ticker: string;
+      yes_price: number | null;
+      trend: string;
+      action_taken: string;
+    }[];
   } | null>(null);
+
+  /* ESPN plays for game-clock → real-time mapping */
+  const [espnPlays, setEspnPlays] = useState<EspnPlay[]>([]);
+
+  /* progressTs: real-world unix timestamp corresponding to current gameClock.
+     Drives the KalshiChart progressive reveal. */
+  const progressTs = useMemo(
+    () => interpolateWallclock(espnPlays, period, gameClock),
+    [espnPlays, period, gameClock]
+  );
 
   /* ---- helpers ---- */
 
@@ -197,10 +588,11 @@ export default function RecordingDashboard({
 
   const fireInference = useCallback(
     (frame: { timestamp: number; base64: string }) => {
-      const ts = `${Math.floor(frame.timestamp / 60)}:${(frame.timestamp % 60).toFixed(1).padStart(4, "0")}`;
+      const mins = Math.floor(frame.timestamp / 60);
+      const secs = Math.floor(frame.timestamp % 60);
+      const ts = `${mins}:${String(secs).padStart(2, "0")}`;
       const entryId = `e${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
 
-      /* add pending entry */
       setEntries((prev) => [
         { id: entryId, ts, text: "...", pending: true, error: false, dim: false },
         ...prev,
@@ -229,13 +621,11 @@ export default function RecordingDashboard({
             return;
           }
 
-          /* dual VLM mode (momentum + score fields) */
           if (data.momentum !== undefined) {
             const momentumStr = (data.momentum || "").trim();
             const scoreStr = (data.score || "").trim();
             const lines: string[] = [];
-            if (momentumStr && momentumStr !== "NONE")
-              lines.push(momentumStr);
+            if (momentumStr && momentumStr !== "NONE") lines.push(momentumStr);
             if (scoreStr && scoreStr !== "NONE")
               lines.push(`score: ${scoreStr}`);
 
@@ -275,7 +665,6 @@ export default function RecordingDashboard({
                 );
               }
 
-              // Fire live trading call with the VLM action as the event
               const tags = pregameTagsRef.current;
               const tickers = marketTickersRef.current;
               if (tags && tickers.length > 0) {
@@ -338,27 +727,19 @@ export default function RecordingDashboard({
               }
             }
           } else {
-            /* legacy single VLM mode */
             const resp = (data.response || "").trim();
             if (resp === "NONE" || resp === "") {
               setEntries((prev) =>
                 prev.map((e) =>
                   e.id === entryId
-                    ? {
-                        ...e,
-                        pending: false,
-                        text: "(no score visible)",
-                        dim: true,
-                      }
+                    ? { ...e, pending: false, text: "(no score visible)", dim: true }
                     : e
                 )
               );
             } else {
               setEntries((prev) =>
                 prev.map((e) =>
-                  e.id === entryId
-                    ? { ...e, pending: false, text: resp }
-                    : e
+                  e.id === entryId ? { ...e, pending: false, text: resp } : e
                 )
               );
 
@@ -471,9 +852,9 @@ export default function RecordingDashboard({
     setDoneTotal(0);
     setLiveScoreA(0);
     setLiveScoreB(0);
-    setGameClock("20:00");
-    setPeriod("1H");
-    setMomentum("neutral 0");
+    setGameClock("—");
+    setPeriod("—");
+    setMomentum("—");
     setCorrection("");
     setTradeSignal(null);
     sequenceRef.current = 0;
@@ -494,6 +875,17 @@ export default function RecordingDashboard({
     a.download = "inference_log.csv";
     a.click();
   }, [entries]);
+
+  /* Fetch ESPN plays to enable game-clock → real-time mapping */
+  useEffect(() => {
+    if (!game?.espnEventId) return;
+    fetch(`/api/espn-plays?event=${game.espnEventId}`)
+      .then((r) => r.json())
+      .then((json) => {
+        if (Array.isArray(json.plays)) setEspnPlays(json.plays);
+      })
+      .catch((e) => console.warn("[espn-plays]", e));
+  }, [game?.espnEventId]);
 
   /* cleanup on unmount */
   useEffect(() => {
@@ -525,10 +917,18 @@ export default function RecordingDashboard({
       });
     } else if (isHls && video.canPlayType("application/vnd.apple.mpegurl")) {
       video.src = streamUrl;
-      video.addEventListener("loadedmetadata", () => video.play().catch(() => {}), { once: true });
+      video.addEventListener(
+        "loadedmetadata",
+        () => video.play().catch(() => {}),
+        { once: true }
+      );
     } else {
       video.src = streamUrl;
-      video.addEventListener("loadedmetadata", () => video.play().catch(() => {}), { once: true });
+      video.addEventListener(
+        "loadedmetadata",
+        () => video.play().catch(() => {}),
+        { once: true }
+      );
     }
 
     return () => {
@@ -556,117 +956,200 @@ export default function RecordingDashboard({
     );
   }
 
-  const winner = game.scoreA > game.scoreB ? "A" : "B";
   const eventCount = entries.filter((e) => !e.pending).length;
+  const aWinning = liveScoreA > liveScoreB;
+  const bWinning = liveScoreB > liveScoreA;
+
+  /* Primary trade signal = first non-HOLD, or first signal */
+  const primarySignal =
+    tradeSignal?.signals.find((s) => s.action_taken !== "HOLD") ??
+    tradeSignal?.signals[0] ??
+    null;
+  const primaryStyle = getActionStyle(primarySignal?.action_taken ?? "HOLD");
 
   return (
-    <div className="min-h-screen bg-background">
-      {/* Hidden canvas for frame capture */}
+    <div className="min-h-screen bg-background flex flex-col">
       <canvas ref={canvasRef} className="hidden" />
 
-      {/* Navbar */}
+      {/* ── NAVBAR ──────────────────────────────────────────────────── */}
       <motion.nav
-        initial={{ opacity: 0, y: -20 }}
+        initial={{ opacity: 0, y: -10 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4 }}
-        className="sticky top-0 z-50 flex items-center justify-between px-6 py-4 border-b border-surface-border bg-background/80 backdrop-blur-xl"
+        transition={{ duration: 0.3 }}
+        className="sticky top-0 z-50 h-14 flex items-center justify-between px-6 border-b border-surface-border bg-background/95 backdrop-blur-xl shrink-0"
       >
-        <div className="flex items-center gap-4">
-          <Link
-            href="/"
-            className="flex items-center gap-2 text-muted hover:text-foreground transition-colors"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            <span className="text-sm font-medium hidden sm:inline">Back</span>
-          </Link>
-          <div className="w-px h-5 bg-surface-border" />
-          <div className="flex items-center gap-3">
-            <span className="text-lg font-bold tracking-tight">
-              Sport<span className="text-accent">Signal</span>
+        <Link
+          href="/"
+          className="group flex items-center gap-2 text-muted hover:text-foreground transition-colors"
+        >
+          <ArrowLeft className="w-4 h-4 group-hover:-translate-x-0.5 transition-transform" />
+          <span className="text-sm font-medium hidden sm:inline">Back</span>
+        </Link>
+
+        <span className="text-base font-bold tracking-tight absolute left-1/2 -translate-x-1/2">
+          Sport<span className="text-accent">Signal</span>
+        </span>
+
+        <div className="flex items-center gap-2">
+          {isLive ? (
+            <span className="flex items-center gap-1.5 text-[10px] font-bold px-2.5 py-1 rounded border bg-green-500/10 border-green-500/25 text-green-400 uppercase tracking-wider">
+              <span className="w-1.5 h-1.5 rounded-full bg-green-400 pulse-live" />
+              Live
             </span>
-          </div>
-        </div>
-        <div className="flex items-center gap-3 text-sm">
-          <span className={`text-[10px] font-bold border rounded-md px-2 py-1 uppercase tracking-wider ${
-            isLive
-              ? "bg-green-500/10 border-green-500/30 text-green-400"
-              : "bg-surface-light border-surface-border text-muted"
-          }`}>
-            {isLive ? "Live" : "Recording"}
-          </span>
+          ) : (
+            <span className="text-[10px] font-bold px-2.5 py-1 rounded border bg-surface-light border-surface-border text-muted uppercase tracking-wider">
+              Recording
+            </span>
+          )}
         </div>
       </motion.nav>
 
-      {/* Game header */}
+      {/* ── SCOREBOARD HERO ─────────────────────────────────────────── */}
       <motion.div
-        initial={{ opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5, delay: 0.1 }}
-        className="border-b border-surface-border"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ duration: 0.5, delay: 0.05 }}
+        className="relative border-b border-surface-border shrink-0 overflow-hidden"
+        style={{
+          background:
+            "radial-gradient(ellipse 80% 140% at 50% 100%, rgba(207,185,145,0.05) 0%, transparent 70%), #0d0d0d",
+        }}
       >
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4">
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-            <div className="flex items-center gap-4">
-              <Trophy className="w-5 h-5 text-accent" />
-              <div>
-                <h1 className="text-lg font-bold">
-                  {game.teamA} vs {game.teamB}
-                </h1>
-                <div className="flex items-center gap-3 text-xs text-muted mt-0.5">
-                  <span className="flex items-center gap-1">
-                    <Calendar className="w-3 h-3" />
-                    {game.date}
+        {/* subtle grid lines */}
+        <div
+          className="absolute inset-0 opacity-[0.03]"
+          style={{
+            backgroundImage:
+              "linear-gradient(rgba(207,185,145,1) 1px, transparent 1px), linear-gradient(90deg, rgba(207,185,145,1) 1px, transparent 1px)",
+            backgroundSize: "60px 60px",
+          }}
+        />
+
+        <div className="relative max-w-7xl mx-auto px-6 py-5">
+          <div className="flex items-center justify-between gap-4">
+            {/* Team A */}
+            <motion.div
+              initial={{ opacity: 0, x: -20 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ duration: 0.5, delay: 0.1 }}
+              className="flex-1 min-w-0"
+            >
+              <p className="text-[10px] text-muted/50 uppercase tracking-widest mb-1.5">
+                Home
+              </p>
+              <h2 className="text-xl sm:text-2xl font-bold leading-tight truncate">
+                {game.teamA}
+              </h2>
+              <p
+                className={`text-sm font-mono font-bold mt-1.5 transition-colors duration-700 ${
+                  aWinning ? "text-accent" : "text-muted/40"
+                }`}
+              >
+                {game.teamAShort}
+              </p>
+            </motion.div>
+
+            {/* Live Score — animated slot machine digits */}
+            <motion.div
+              initial={{ opacity: 0, scale: 0.92 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ duration: 0.5, delay: 0.15 }}
+              className="flex flex-col items-center shrink-0"
+            >
+              <div className="flex items-center gap-5 sm:gap-8">
+                <AnimatedScore value={liveScoreA} highlight={aWinning} />
+
+                {/* Clock / period center */}
+                <div className="flex flex-col items-center gap-0.5 self-stretch justify-center">
+                  <span className="text-muted/15 text-xl leading-none select-none font-thin">|</span>
+                  <span className="text-sm font-mono font-semibold text-foreground/55 tabular-nums">
+                    {gameClock}
                   </span>
-                  <span className="font-mono">{game.kalshiTicker}</span>
+                  <span className="text-[10px] font-bold text-accent tracking-widest">
+                    {period}
+                  </span>
+                  <span className="text-muted/15 text-xl leading-none select-none font-thin">|</span>
                 </div>
+
+                <AnimatedScore value={liveScoreB} highlight={bWinning} />
               </div>
-            </div>
-            <div className="flex items-center gap-3">
-              <div
-                className={`text-sm font-bold px-3 py-1.5 rounded-sm ${
-                  winner === "A"
-                    ? "bg-accent/10 text-accent"
-                    : "bg-surface-light text-muted"
+
+              {/* Momentum + correction */}
+              <div className="mt-3 flex items-center gap-3">
+                <span className="text-[11px] text-muted/40 font-mono">
+                  momentum:{" "}
+                  <span className="text-foreground/55">{momentum}</span>
+                </span>
+                {game.spread && (
+                  <span className="text-[10px] px-1.5 py-0.5 bg-surface border border-surface-border rounded font-mono text-muted/50">
+                    {game.spread}
+                  </span>
+                )}
+              </div>
+              {correction && (
+                <p className="mt-1 text-[10px] text-yellow-400 pulse-live font-mono">
+                  {correction}
+                </p>
+              )}
+            </motion.div>
+
+            {/* Team B */}
+            <motion.div
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ duration: 0.5, delay: 0.1 }}
+              className="flex-1 min-w-0 text-right"
+            >
+              <p className="text-[10px] text-muted/50 uppercase tracking-widest mb-1.5">
+                Away
+              </p>
+              <h2 className="text-xl sm:text-2xl font-bold leading-tight truncate">
+                {game.teamB}
+              </h2>
+              <p
+                className={`text-sm font-mono font-bold mt-1.5 transition-colors ${
+                  bWinning ? "text-accent" : "text-muted/40"
                 }`}
               >
-                {game.teamAShort} {game.scoreA}
-              </div>
-              <span className="text-xs text-muted">—</span>
-              <div
-                className={`text-sm font-bold px-3 py-1.5 rounded-sm ${
-                  winner === "B"
-                    ? "bg-accent/10 text-accent"
-                    : "bg-surface-light text-muted"
-                }`}
-              >
-                {game.teamBShort} {game.scoreB}
-              </div>
-              <span className="text-xs bg-surface-light border border-surface-border rounded-md px-2 py-1 font-mono text-muted ml-2">
-                {game.spread}
-              </span>
-            </div>
+                {game.teamBShort}
+              </p>
+            </motion.div>
           </div>
         </div>
       </motion.div>
 
-      {/* Dashboard grid — stream left, event stream right */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6">
-        <div className="grid lg:grid-cols-[1fr_380px] gap-6 h-[calc(100vh-220px)]">
-          {/* Left: Recording / Stream */}
-          <motion.div
-            initial={{ opacity: 0, x: -20 }}
-            animate={{ opacity: 1, x: 0 }}
-            transition={{ duration: 0.5, delay: 0.2 }}
-            className="flex flex-col gap-4"
-          >
-            <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-widest text-accent">
-              {isLive ? <Radio className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-              {isLive ? "Livestream" : "Recording"}
-            </div>
+      {/* ── MAIN CONTENT ────────────────────────────────────────────── */}
+      <div className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 py-6">
+        <div className="grid lg:grid-cols-[1fr_380px] gap-6 items-start">
 
-            <div className="relative flex-1 rounded-md overflow-hidden border border-surface-border glow-gold">
-              <div className="animated-border p-[1px] rounded-md h-full">
-                <div className="bg-surface rounded-md h-full flex flex-col items-center justify-center gap-4">
+          {/* ── LEFT COLUMN: Video + Chart ────────────────────────── */}
+          <motion.div
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.45, delay: 0.2 }}
+            className="flex flex-col gap-5"
+          >
+            {/* Video player */}
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                {isLive ? (
+                  <Radio className="w-3.5 h-3.5 text-accent" />
+                ) : (
+                  <Play className="w-3.5 h-3.5 text-accent" />
+                )}
+                <span className="text-[10px] font-bold uppercase tracking-widest text-accent">
+                  {isLive ? "Livestream" : "Game Recording"}
+                </span>
+              </div>
+
+              <div
+                className={`rounded-xl overflow-hidden transition-all duration-500 ${
+                  capturing
+                    ? "border border-accent/40 shadow-[0_0_60px_-10px_rgba(207,185,145,0.15)]"
+                    : "border border-surface-border"
+                }`}
+              >
+                <div className="aspect-video bg-black relative flex items-center justify-center">
                   {game.videoSrc || isLive ? (
                     <video
                       ref={videoRef}
@@ -675,273 +1158,333 @@ export default function RecordingDashboard({
                       muted={isLive}
                       playsInline
                       crossOrigin="anonymous"
-                      className="w-full h-full rounded-md object-contain bg-black"
+                      className="w-full h-full object-contain"
                     />
                   ) : (
-                    <>
-                      <Radio className="w-12 h-12 text-muted/40" />
-                      <p className="text-muted text-sm text-center max-w-xs">
-                        Game recording will be displayed here.
-                        <br />
-                        <span className="text-muted/60 text-xs">
-                          Connect a recording source to replay.
-                        </span>
+                    <div className="flex flex-col items-center gap-3">
+                      <div className="w-14 h-14 rounded-2xl bg-surface-light border border-surface-border flex items-center justify-center">
+                        <Radio className="w-6 h-6 text-muted/30" />
+                      </div>
+                      <p className="text-muted/40 text-xs text-center max-w-[180px] leading-relaxed">
+                        No recording source connected
                       </p>
-                    </>
+                    </div>
                   )}
+
+                  <AnimatePresence>
+                    {capturing && (
+                      <motion.div
+                        initial={{ opacity: 0, scale: 0.85 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.85 }}
+                        className="absolute top-3 right-3 flex items-center gap-1.5 bg-black/80 backdrop-blur-sm rounded-full px-3 py-1.5 border border-accent/20"
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full bg-accent pulse-live" />
+                        <span className="text-[10px] font-bold text-accent tracking-wider">
+                          AI ACTIVE
+                        </span>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                 </div>
               </div>
-            </div>
 
-            {/* Capture bar */}
-            <div className="flex items-center gap-3">
-              <motion.button
-                whileHover={{ scale: 1.02 }}
-                whileTap={{ scale: 0.98 }}
-                onClick={capturing ? stopCapturing : startCapturing}
-                className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-bold transition-colors ${
-                  capturing
-                    ? "bg-red-500/20 text-red-400 border border-red-500/30 hover:bg-red-500/30"
-                    : "bg-accent text-black hover:bg-accent-light"
-                }`}
-              >
-                {capturing ? (
-                  <>
-                    <Square className="w-3.5 h-3.5" />
-                    Stop Capturing
-                  </>
-                ) : (
-                  <>
-                    <Play className="w-3.5 h-3.5" />
-                    Start Capturing
-                  </>
-                )}
-              </motion.button>
-              <div className="ml-auto flex items-center gap-4 text-xs text-muted font-mono">
-                <span>
-                  inflight:{" "}
-                  <span className="text-foreground">{inflight}</span>
-                </span>
-                <span>
-                  done:{" "}
-                  <span className="text-foreground">{doneTotal}</span>
-                </span>
+              {/* Capture controls */}
+              <div className="mt-4 flex flex-col gap-3">
+                <motion.button
+                  whileHover={{ scale: 1.01 }}
+                  whileTap={{ scale: 0.98 }}
+                  onClick={capturing ? stopCapturing : startCapturing}
+                  className={`w-full flex items-center justify-center gap-2.5 py-3 rounded-lg text-sm font-bold transition-all duration-200 ${
+                    capturing
+                      ? "bg-red-500/10 text-red-400 border border-red-500/25 hover:bg-red-500/15"
+                      : "bg-accent text-black hover:bg-accent-light"
+                  }`}
+                >
+                  {capturing ? (
+                    <>
+                      <Square className="w-4 h-4" />
+                      Stop AI Analysis
+                    </>
+                  ) : (
+                    <>
+                      <Zap className="w-4 h-4" />
+                      Start AI Analysis
+                    </>
+                  )}
+                </motion.button>
+
+                <div className="flex items-center justify-between px-1">
+                  <span className="text-[11px] text-muted/60">
+                    {inflight > 0 ? (
+                      <span className="flex items-center gap-1.5">
+                        <span className="inline-block w-2.5 h-2.5 border border-accent border-t-transparent rounded-full animate-spin" />
+                        Analyzing {inflight} frame{inflight > 1 ? "s" : ""}…
+                      </span>
+                    ) : capturing ? (
+                      "Watching for activity…"
+                    ) : (
+                      "AI analysis paused"
+                    )}
+                  </span>
+                  <span className="text-[11px] text-muted/40 font-mono">
+                    {doneTotal} frames analyzed
+                  </span>
+                </div>
               </div>
-            </div>
 
-            {game.kalshiUrl && (
-              <a
-                href={game.kalshiUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-xs text-accent hover:underline"
-              >
-                View market on Kalshi →
-              </a>
-            )}
+              {game.kalshiUrl && (
+                <a
+                  href={game.kalshiUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-2 inline-flex items-center gap-1 text-[11px] text-accent/70 hover:text-accent transition-colors"
+                >
+                  View on Kalshi
+                  <ChevronRight className="w-3 h-3" />
+                </a>
+              )}
+            </div>
 
             {/* Kalshi Price Chart */}
             {game.kalshiTicker && (
-              <>
-                <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-widest text-accent">
-                  <TrendingUp className="w-4 h-4" />
-                  Kalshi Price
+              <div>
+                <div className="flex items-center gap-2 mb-3">
+                  <TrendingUp className="w-3.5 h-3.5 text-accent" />
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-accent">
+                    Market Price History
+                  </span>
+                  <span className="ml-auto text-[10px] font-mono text-muted/35 truncate max-w-[180px]">
+                    {game.kalshiTicker}
+                  </span>
                 </div>
-                <div className="h-52">
-                  <KalshiChart ticker={game.kalshiTicker} startTs={game.kalshiStartTs} endTs={game.kalshiEndTs} />
+                <div className="rounded-xl border border-surface-border overflow-hidden bg-surface h-72">
+                  <KalshiChart
+                    ticker={game.kalshiTicker}
+                    startTs={game.kalshiStartTs}
+                    endTs={game.kalshiEndTs}
+                    progressTs={progressTs}
+                  />
                 </div>
-              </>
+              </div>
             )}
           </motion.div>
 
-          {/* Right: Event Stream */}
+          {/* ── RIGHT COLUMN: Trade Signal + Feed ─────────────────── */}
           <motion.div
-            initial={{ opacity: 0, x: 20 }}
-            animate={{ opacity: 1, x: 0 }}
-            transition={{ duration: 0.5, delay: 0.3 }}
-            className="flex flex-col gap-4 min-h-0 max-h-[calc(100vh-220px)]"
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.45, delay: 0.28 }}
+            className="flex flex-col gap-5"
           >
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-widest text-accent">
-                <Activity className="w-4 h-4" />
-                Event Stream
-              </div>
-              <span className="text-[10px] text-muted bg-surface-light border border-surface-border rounded-md px-2.5 py-0.5">
-                {eventCount} events
-              </span>
-            </div>
-
-            {/* Scoreboard */}
-            <div className="rounded-md border border-surface-border bg-surface-light overflow-hidden">
-              <div className="flex items-center justify-between px-4 py-3">
-                <span className="text-xs font-bold uppercase tracking-wider text-muted">
-                  {game.teamAShort}
+            {/* ── TRADE SIGNAL CARD ── */}
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                <Zap className="w-3.5 h-3.5 text-accent" />
+                <span className="text-[10px] font-bold uppercase tracking-widest text-accent">
+                  AI Trade Signal
                 </span>
-                <div className="text-center">
-                  <div className="text-2xl font-bold font-mono tabular-nums tracking-wider">
-                    {liveScoreA} – {liveScoreB}
-                  </div>
-                  <div className="flex items-center justify-center gap-2 mt-0.5">
-                    <span className="text-xs font-mono text-muted">
-                      {gameClock}
-                    </span>
-                    <span className="text-[10px] font-bold text-accent">
-                      {period}
-                    </span>
-                  </div>
-                  {correction && (
-                    <span className="text-[10px] text-yellow-400 pulse-live">
-                      {correction}
-                    </span>
-                  )}
-                </div>
-                <span className="text-xs font-bold uppercase tracking-wider text-muted">
-                  {game.teamBShort}
-                </span>
-              </div>
-              <div className="border-t border-surface-border px-4 py-1.5 text-center">
-                <span className="text-[10px] text-muted">
-                  momentum:{" "}
-                  <span className="text-foreground font-mono">
-                    {momentum}
-                  </span>
-                </span>
-              </div>
-            </div>
-
-            {/* Trade Signal */}
-            <div className="rounded-md border border-surface-border bg-surface-light overflow-hidden">
-              <div className="flex items-center justify-between px-4 py-2 border-b border-surface-border">
-                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-widest text-accent">
-                  <TrendingUp className="w-3.5 h-3.5" />
-                  Trade Signal
-                </div>
                 {tradeLoading && (
-                  <span className="inline-block w-3 h-3 border-2 border-accent border-t-transparent rounded-full animate-spin" />
+                  <span className="ml-auto inline-block w-3 h-3 border-2 border-accent border-t-transparent rounded-full animate-spin" />
                 )}
               </div>
 
-              {pregameStatus === "idle" && (
-                <p className="px-4 py-2.5 text-[11px] text-muted">
-                  Start capturing to activate
-                </p>
-              )}
-              {pregameStatus === "loading" && (
-                <p className="px-4 py-2.5 text-[11px] text-muted animate-pulse">
-                  Loading game memory…
-                </p>
-              )}
-              {pregameStatus === "error" && (
-                <p className="px-4 py-2.5 text-[11px] text-red-400">
-                  Pregame load failed — signals unavailable
-                </p>
-              )}
-              {pregameStatus === "ready" && !tradeSignal && (
-                <p className="px-4 py-2.5 text-[11px] text-muted">
-                  Waiting for first event…
-                </p>
-              )}
-              {tradeSignal && (
-                <div className="px-4 py-3 space-y-2.5">
-                  <p className="text-[11px] text-foreground/70 leading-relaxed line-clamp-3">
-                    {tradeSignal.analysis}
-                  </p>
-                  <div className="space-y-1.5">
-                    {tradeSignal.signals.map((sig) => (
-                      <div
-                        key={sig.market_ticker}
-                        className="flex items-center justify-between gap-2"
-                      >
-                        <span className="text-[10px] font-mono text-muted truncate">
-                          {sig.market_ticker}
-                        </span>
-                        <div className="flex items-center gap-2 shrink-0">
-                          <span
-                            className={`text-[10px] font-bold px-2 py-0.5 rounded-sm ${
-                              sig.action_taken === "HOLD"
-                                ? "bg-surface text-muted border border-surface-border"
-                                : sig.action_taken?.startsWith("BUY")
-                                  ? "bg-green-500/20 text-green-400"
-                                  : "bg-red-500/20 text-red-400"
-                            }`}
-                          >
-                            {sig.action_taken}
-                          </span>
-                          {sig.yes_price != null && (
-                            <span className="text-[10px] font-mono text-foreground/60">
-                              ${sig.yes_price.toFixed(2)}
-                            </span>
-                          )}
+              <AnimatePresence mode="wait">
+                {/* Idle / Loading / Error states */}
+                {!tradeSignal && (
+                  <motion.div
+                    key={pregameStatus}
+                    initial={{ opacity: 0, y: 6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -6 }}
+                    className="rounded-xl border border-surface-border bg-surface p-6 text-center"
+                  >
+                    {pregameStatus === "idle" && (
+                      <>
+                        <div className="w-12 h-12 rounded-2xl bg-surface-light border border-surface-border flex items-center justify-center mx-auto mb-3">
+                          <Zap className="w-5 h-5 text-muted/30" />
                         </div>
+                        <p className="text-sm font-medium text-foreground/60">
+                          Ready to analyze
+                        </p>
+                        <p className="text-[11px] text-muted/40 mt-1 max-w-[180px] mx-auto leading-relaxed">
+                          Press &quot;Start AI Analysis&quot; to get live trade
+                          signals
+                        </p>
+                      </>
+                    )}
+                    {pregameStatus === "loading" && (
+                      <>
+                        <div className="w-12 h-12 rounded-2xl bg-surface-light border border-surface-border flex items-center justify-center mx-auto mb-3">
+                          <span className="w-5 h-5 border-2 border-accent border-t-transparent rounded-full animate-spin" />
+                        </div>
+                        <p className="text-sm font-medium text-foreground/60 animate-pulse">
+                          Loading game context…
+                        </p>
+                      </>
+                    )}
+                    {pregameStatus === "error" && (
+                      <>
+                        <p className="text-sm font-medium text-red-400">
+                          Connection failed
+                        </p>
+                        <p className="text-[11px] text-muted/40 mt-1">
+                          Could not reach the AI server
+                        </p>
+                      </>
+                    )}
+                    {pregameStatus === "ready" && (
+                      <>
+                        <div className="w-12 h-12 rounded-2xl bg-surface-light border border-surface-border flex items-center justify-center mx-auto mb-3">
+                          <span className="w-5 h-5 border-2 border-accent border-t-transparent rounded-full animate-spin" />
+                        </div>
+                        <p className="text-sm font-medium text-foreground/60">
+                          Watching the game…
+                        </p>
+                        <p className="text-[11px] text-muted/40 mt-1">
+                          Signal will appear soon
+                        </p>
+                      </>
+                    )}
+                  </motion.div>
+                )}
+
+                {/* Active trade signal */}
+                {tradeSignal && primarySignal && (
+                  <motion.div
+                    key="signal"
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0 }}
+                    className={`rounded-xl border overflow-hidden ${primaryStyle.border} ${primaryStyle.bg} ${primaryStyle.glow}`}
+                  >
+                    {/* Big action hero */}
+                    <div className="px-5 py-5 border-b border-white/5">
+                      <div className="flex items-center gap-3">
+                        <div className={`${primaryStyle.text}`}>
+                          {primaryStyle.icon}
+                        </div>
+                        <span
+                          className={`text-4xl font-mono font-black tracking-tight ${primaryStyle.text}`}
+                        >
+                          {primarySignal.action_taken}
+                        </span>
+                        {primarySignal.yes_price != null && (
+                          <span className="ml-auto text-2xl font-mono font-bold text-foreground/70">
+                            {(primarySignal.yes_price * 100).toFixed(0)}
+                            <span className="text-base text-muted/60">¢</span>
+                          </span>
+                        )}
                       </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+                      <p className="text-[11px] text-foreground/50 leading-relaxed mt-3 line-clamp-3">
+                        {tradeSignal.analysis}
+                      </p>
+                    </div>
+
+                    {/* All signals */}
+                    {tradeSignal.signals.length > 1 && (
+                      <div className="px-4 py-3 space-y-1.5">
+                        {tradeSignal.signals.map((sig) => {
+                          const style = getActionStyle(sig.action_taken);
+                          return (
+                            <div
+                              key={sig.market_ticker}
+                              className="flex items-center justify-between gap-2"
+                            >
+                              <span className="text-[10px] font-mono text-muted/50 truncate flex-1">
+                                {sig.market_ticker}
+                              </span>
+                              <div className="flex items-center gap-2 shrink-0">
+                                {sig.yes_price != null && (
+                                  <span className="text-[10px] font-mono text-foreground/35">
+                                    ${sig.yes_price.toFixed(2)}
+                                  </span>
+                                )}
+                                <span
+                                  className={`text-[10px] font-bold px-2 py-0.5 rounded-sm border ${style.badge}`}
+                                >
+                                  {sig.action_taken}
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
 
-            {/* Event log */}
-            <div className="flex-1 rounded-md border border-surface-border bg-surface overflow-hidden flex flex-col min-h-0">
-              <div className="flex-1 overflow-y-scroll">
-                {entries.length === 0 ? (
-                  <div className="flex-1 flex flex-col items-center justify-center gap-3 p-6 h-full">
-                    <div className="w-12 h-12 rounded-md bg-surface-light border border-surface-border flex items-center justify-center">
-                      <Activity className="w-5 h-5 text-muted/40" />
-                    </div>
-                    <p className="text-sm text-muted text-center">
-                      No events recorded yet
-                    </p>
-                    <p className="text-xs text-muted/60 text-center max-w-[200px]">
-                      Press &quot;Start Capturing&quot; while the video plays to
-                      begin inference.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="divide-y divide-surface-border">
-                    {entries.map((entry) => (
-                      <div
-                        key={entry.id}
-                        className={`px-3 py-2 text-xs font-mono transition-opacity ${
-                          entry.dim ? "opacity-40" : ""
-                        } ${entry.error ? "text-red-400" : ""}`}
-                      >
-                        <div className="flex items-center gap-2 mb-0.5">
-                          {entry.pending && (
-                            <span className="inline-block w-3 h-3 border-2 border-accent border-t-transparent rounded-md animate-spin" />
-                          )}
-                          <span className="text-muted">{entry.ts}</span>
-                        </div>
-                        <div className="whitespace-pre-wrap text-foreground/80 pl-5">
-                          {entry.text}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* Bottom bar */}
-              <div className="border-t border-surface-border px-4 py-3 flex items-center justify-between bg-surface-light/50">
-                <span className="text-[10px] text-muted font-mono">
-                  {game.kalshiTicker}
+            {/* ── AI OBSERVATIONS FEED ── */}
+            <div className="flex flex-col">
+              <div className="flex items-center gap-2 mb-3">
+                <Activity className="w-3.5 h-3.5 text-accent" />
+                <span className="text-[10px] font-bold uppercase tracking-widest text-accent">
+                  AI Observations
                 </span>
-                <div className="flex items-center gap-2">
+                <span className="ml-auto text-[10px] text-muted/50 font-mono">
+                  {eventCount} events
+                </span>
+                <div className="flex items-center gap-2 ml-2">
+                  <button
+                    type="button"
+                    onClick={() => setRawMode((v) => !v)}
+                    title={rawMode ? "Switch to readable view" : "Switch to raw view"}
+                    className={`transition-colors ${rawMode ? "text-accent" : "text-muted/40 hover:text-foreground"}`}
+                  >
+                    <Code2 className="w-3.5 h-3.5" />
+                  </button>
                   <button
                     type="button"
                     onClick={exportCSV}
-                    className="text-[10px] text-muted hover:text-foreground transition-colors flex items-center gap-1"
+                    title="Export CSV"
+                    className="text-muted/40 hover:text-foreground transition-colors"
                   >
-                    <Download className="w-3 h-3" />
-                    CSV
+                    <Download className="w-3.5 h-3.5" />
                   </button>
                   <button
                     type="button"
                     onClick={clearLog}
-                    className="text-[10px] text-muted hover:text-red-400 transition-colors flex items-center gap-1"
+                    title="Clear log"
+                    className="text-muted/40 hover:text-red-400 transition-colors"
                   >
-                    <Trash2 className="w-3 h-3" />
-                    Clear
+                    <Trash2 className="w-3.5 h-3.5" />
                   </button>
+                </div>
+              </div>
+
+              <div
+                className="rounded-xl border border-surface-border bg-surface overflow-hidden flex flex-col"
+                style={{ height: "340px" }}
+              >
+                <div className="flex-1 overflow-y-auto">
+                  {entries.length === 0 ? (
+                    <div className="h-full flex flex-col items-center justify-center gap-3 p-8">
+                      <div className="w-10 h-10 rounded-xl bg-surface-light border border-surface-border flex items-center justify-center">
+                        <Activity className="w-4 h-4 text-muted/25" />
+                      </div>
+                      <p className="text-sm text-muted/50 text-center">
+                        No observations yet
+                      </p>
+                      <p className="text-[11px] text-muted/30 text-center max-w-[160px] leading-relaxed">
+                        The AI will log what it sees each second
+                      </p>
+                    </div>
+                  ) : (
+                    <div>
+                      {entries.map((entry, idx) => (
+                        <ObservationEntry
+                          key={entry.id}
+                          entry={entry}
+                          teamAShort={game.teamAShort}
+                          teamBShort={game.teamBShort}
+                          isLatest={idx === 0}
+                          rawMode={rawMode}
+                        />
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
