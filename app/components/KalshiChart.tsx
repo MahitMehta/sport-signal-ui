@@ -15,6 +15,7 @@ interface KalshiChartProps {
   ticker: string;
   startTs: number;
   endTs: number;
+  onDataLoaded?: (data: ForecastPoint[]) => void;
 }
 
 /* ------------------------------------------------------------------ */
@@ -47,9 +48,13 @@ function get830pmEstTs(refTs: number): number {
 /*  COMPONENT                                                          */
 /* ------------------------------------------------------------------ */
 
-export default function KalshiChart({ ticker, startTs, endTs }: KalshiChartProps) {
+export type { ForecastPoint };
+
+export default function KalshiChart({ ticker, startTs, endTs, onDataLoaded }: KalshiChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const onDataLoadedRef = useRef(onDataLoaded);
+  onDataLoadedRef.current = onDataLoaded;
 
   const [data, setData] = useState<ForecastPoint[]>([]);
   const [marketLabel, setMarketLabel] = useState("");
@@ -88,9 +93,12 @@ export default function KalshiChart({ ticker, startTs, endTs }: KalshiChartProps
       // Filter to only show data from 8:30 PM EST onward
       if (points.length > 0) {
         const cutoff = get830pmEstTs(points[0].end_period_ts);
-        setData(points.filter((p) => p.end_period_ts >= cutoff));
+        const filtered = points.filter((p) => p.end_period_ts >= cutoff);
+        setData(filtered);
+        onDataLoadedRef.current?.(filtered);
       } else {
         setData(points);
+        onDataLoadedRef.current?.(points);
       }
     } catch {
       setError("Network error");

@@ -9,7 +9,8 @@
       "Bash(git diff app/recordings/[id]/page.tsx)",
       "Bash(npm install hls.js)",
       "Bash(mediamtx --help)",
-      "Read(//opt/homebrew/etc/**)"
+      "Read(//opt/homebrew/etc/**)",
+      "Read(//Users/mahitmehta/Desktop/Career/bet/polibetting-inference/**)"
     ],
     "additionalDirectories": [
       "/Users/mahitmehta/Desktop/Career/bet/sport-signal-ui/app/api"

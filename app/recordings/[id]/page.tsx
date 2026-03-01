@@ -16,9 +16,11 @@ import {
   Trash2,
   TrendingUp,
   Trophy,
+  Wallet,
   Zap,
 } from "lucide-react";
-import KalshiChart from "@/app/components/KalshiChart";
+import KalshiChart, { type ForecastPoint } from "@/app/components/KalshiChart";
+import PriceHistoryChart from "@/app/components/PriceHistoryChart";
 
 /* ------------------------------------------------------------------ */
 /*  DATA                                                               */
@@ -104,6 +106,19 @@ interface LogEntry {
   pending: boolean;
   error: boolean;
   dim: boolean;
+  flags: string[];
+  latencyMs: number | null;
+}
+
+interface TradeResult {
+  order_id: string;
+  ticker: string;
+  action: string;
+  side: string;
+  contracts: number;
+  price: number;
+  buying_power: number;
+  ts: number;
 }
 
 /* ------------------------------------------------------------------ */
@@ -112,7 +127,7 @@ interface LogEntry {
 
 const SCALE_W = 480;
 const INFER_URL = "http://localhost:8080/infer";
-const DECISION_URL = "http://localhost:8000";
+const DECISION_URL = "http://localhost:8080";
 
 /* ------------------------------------------------------------------ */
 /*  PAGE                                                               */
@@ -174,6 +189,15 @@ export default function RecordingDashboard({
     analysis: string;
     signals: { market_ticker: string; yes_price: number | null; trend: string; action_taken: string }[];
   } | null>(null);
+  const [videoProgress, setVideoProgress] = useState(0);
+  const [buySignals, setBuySignals] = useState<{ ts: number; ticker: string }[]>([]);
+  const [sellSignals, setSellSignals] = useState<{ ts: number; ticker: string }[]>([]);
+
+  const [tradeResults, setTradeResults] = useState<TradeResult[]>([]);
+  const [buyingPower, setBuyingPower] = useState<number | null>(null);
+  const kalshiDataRef = useRef<ForecastPoint[]>([]);
+  const priceAtPlayheadRef = useRef<Record<string, number>>({});
+
 
   /* ---- helpers ---- */
 
@@ -195,6 +219,33 @@ export default function RecordingDashboard({
     };
   }, []);
 
+  const executeTrade = useCallback(
+    (action: "buy" | "sell", ticker: string, side: string, contracts: number, price: number) => {
+      fetch(`${DECISION_URL}/trade/${action}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ticker, side, contracts, price }),
+      })
+        .then((r) => r.json())
+        .then((data) => {
+          const result: TradeResult = {
+            order_id: data.order_id,
+            ticker: data.ticker,
+            action: data.action,
+            side: data.side,
+            contracts: data.contracts,
+            price: data.price,
+            buying_power: data.buying_power,
+            ts: Date.now(),
+          };
+          setTradeResults((prev) => [result, ...prev]);
+          setBuyingPower(data.buying_power);
+        })
+        .catch((e) => console.error(`[trade/${action}] failed:`, e));
+    },
+    []
+  );
+
   const fireInference = useCallback(
     (frame: { timestamp: number; base64: string }) => {
       const ts = `${Math.floor(frame.timestamp / 60)}:${(frame.timestamp % 60).toFixed(1).padStart(4, "0")}`;
@@ -202,11 +253,12 @@ export default function RecordingDashboard({
 
       /* add pending entry */
       setEntries((prev) => [
-        { id: entryId, ts, text: "...", pending: true, error: false, dim: false },
+        { id: entryId, ts, text: "...", pending: true, error: false, dim: false, flags: [], latencyMs: null },
         ...prev,
       ]);
       setInflight((n) => n + 1);
 
+      const t0 = performance.now();
       fetch(INFER_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -218,11 +270,12 @@ export default function RecordingDashboard({
       })
         .then((r) => r.json())
         .then((data) => {
+          const latencyMs = Math.round(performance.now() - t0);
           if (data.error) {
             setEntries((prev) =>
               prev.map((e) =>
                 e.id === entryId
-                  ? { ...e, pending: false, error: true, text: data.error }
+                  ? { ...e, pending: false, error: true, text: data.error, latencyMs }
                   : e
               )
             );
@@ -240,6 +293,7 @@ export default function RecordingDashboard({
               lines.push(`score: ${scoreStr}`);
 
             const isDim = lines.length === 0;
+            const flags: string[] = Array.isArray(data.flags) ? data.flags : [];
             setEntries((prev) =>
               prev.map((e) =>
                 e.id === entryId
@@ -248,6 +302,8 @@ export default function RecordingDashboard({
                       pending: false,
                       text: isDim ? "(no data)" : lines.join("\n"),
                       dim: isDim,
+                      flags,
+                      latencyMs,
                     }
                   : e
               )
@@ -302,22 +358,62 @@ export default function RecordingDashboard({
                   .then((r) => r.json())
                   .then((liveData) => {
                     if (liveData.analysis) {
-                      setTradeSignal({
-                        analysis: liveData.analysis,
-                        signals: (liveData.market_signals ?? []).map(
-                          (s: {
-                            market_ticker: string;
-                            yes_price: number | null;
-                            trend: string;
-                            action_taken: string;
-                          }) => ({
+                      const playheadPrices = priceAtPlayheadRef.current;
+                      const signals = (liveData.market_signals ?? []).map(
+                        (s: {
+                          market_ticker: string;
+                          yes_price: number | null;
+                          trend: string;
+                          action_taken: string;
+                        }) => {
+                          const chartPrice = playheadPrices[s.market_ticker] ?? null;
+                          return {
                             market_ticker: s.market_ticker,
-                            yes_price: s.yes_price ?? null,
+                            yes_price: chartPrice != null ? chartPrice / 100 : (s.yes_price ?? null),
                             trend: s.trend,
                             action_taken: s.action_taken ?? "HOLD",
-                          })
-                        ),
+                          };
+                        }
+                      );
+                      setTradeSignal({
+                        analysis: liveData.analysis,
+                        signals,
                       });
+                      const now = Date.now();
+                      const newBuys = signals
+                        .filter((s: { action_taken: string }) => s.action_taken.startsWith("BUY"))
+                        .map((s: { market_ticker: string }) => ({ ts: now, ticker: s.market_ticker }));
+                      if (newBuys.length > 0) {
+                        setBuySignals((prev) => [...prev, ...newBuys]);
+                      }
+                      const newSells = signals
+                        .filter((s: { action_taken: string }) => s.action_taken.startsWith("SELL"))
+                        .map((s: { market_ticker: string }) => ({ ts: now, ticker: s.market_ticker }));
+                      if (newSells.length > 0) {
+                        setSellSignals((prev) => [...prev, ...newSells]);
+                      }
+
+                      // Execute trades for BUY/SELL signals
+                      for (const sig of signals) {
+                        console.log("processing signal:", sig);
+                        const parts = sig.action_taken.split(/\s+/);
+                        const verb = parts[0]?.toUpperCase();
+                        console.log("verb:", verb);
+                        if (verb !== "BUY" && verb !== "SELL") continue;
+                        const side = (parts[1] || "yes").toLowerCase();
+                        console.log("side:", side);
+                        const contractsStr = parts[2]?.replace(/c$/i, "");
+                        const contracts = contractsStr ? parseInt(contractsStr, 10) : 1;
+                    
+  
+                        executeTrade(
+                          verb.toLowerCase() as "buy" | "sell",
+                          sig.market_ticker,
+                          side,
+                          Number.isNaN(contracts) ? 1 : contracts,
+                          sig.yes_price ?? 0,
+                        );
+                      }
                     }
                   })
                   .catch((e) => console.error("[live] failed:", e))
@@ -349,6 +445,7 @@ export default function RecordingDashboard({
                         pending: false,
                         text: "(no score visible)",
                         dim: true,
+                        latencyMs,
                       }
                     : e
                 )
@@ -357,7 +454,7 @@ export default function RecordingDashboard({
               setEntries((prev) =>
                 prev.map((e) =>
                   e.id === entryId
-                    ? { ...e, pending: false, text: resp }
+                    ? { ...e, pending: false, text: resp, latencyMs }
                     : e
                 )
               );
@@ -384,7 +481,7 @@ export default function RecordingDashboard({
           setEntries((prev) =>
             prev.map((e) =>
               e.id === entryId
-                ? { ...e, pending: false, error: true, text: err.message }
+                ? { ...e, pending: false, error: true, text: err.message, latencyMs: Math.round(performance.now() - t0) }
                 : e
             )
           );
@@ -394,8 +491,9 @@ export default function RecordingDashboard({
           setDoneTotal((n) => n + 1);
         });
     },
-    []
+    [executeTrade]
   );
+
 
   /* ---- auto capture loop ---- */
 
@@ -476,6 +574,10 @@ export default function RecordingDashboard({
     setMomentum("neutral 0");
     setCorrection("");
     setTradeSignal(null);
+    setBuySignals([]);
+    setSellSignals([]);
+    setTradeResults([]);
+    setBuyingPower(null);
     sequenceRef.current = 0;
   }, []);
 
@@ -494,6 +596,19 @@ export default function RecordingDashboard({
     a.download = "inference_log.csv";
     a.click();
   }, [entries]);
+
+  /* track video progress for chart playhead */
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const onTimeUpdate = () => {
+      if (video.duration > 0) {
+        setVideoProgress(video.currentTime / video.duration);
+      }
+    };
+    video.addEventListener("timeupdate", onTimeUpdate);
+    return () => video.removeEventListener("timeupdate", onTimeUpdate);
+  }, []);
 
   /* cleanup on unmount */
   useEffect(() => {
@@ -740,18 +855,27 @@ export default function RecordingDashboard({
               </a>
             )}
 
-            {/* Kalshi Price Chart */}
-            {game.kalshiTicker && (
+            {/* Price Chart */}
+            {id === "1" ? (
               <>
                 <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-widest text-accent">
                   <TrendingUp className="w-4 h-4" />
-                  Kalshi Price
+                  Market Price
                 </div>
                 <div className="h-52">
-                  <KalshiChart ticker={game.kalshiTicker} startTs={game.kalshiStartTs} endTs={game.kalshiEndTs} />
+                  <PriceHistoryChart
+                    baseUrl={DECISION_URL}
+                    scoreA={liveScoreA}
+                    scoreB={liveScoreB}
+                    gameClock={gameClock}
+                    videoProgress={videoProgress}
+                    buySignals={buySignals}
+                    sellSignals={sellSignals}
+                    onPriceAtPlayhead={(prices) => { priceAtPlayheadRef.current = prices; }}
+                  />
                 </div>
               </>
-            )}
+            ) : null}
           </motion.div>
 
           {/* Right: Event Stream */}
@@ -759,7 +883,7 @@ export default function RecordingDashboard({
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
             transition={{ duration: 0.5, delay: 0.3 }}
-            className="flex flex-col gap-4 min-h-0 max-h-[calc(100vh-220px)]"
+            className="flex flex-col gap-4 min-h-0 max-h-[calc(100vh-50px)]"
           >
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 text-sm font-semibold uppercase tracking-widest text-accent">
@@ -880,6 +1004,66 @@ export default function RecordingDashboard({
               )}
             </div>
 
+            {/* Trading Bar */}
+            {tradeResults.length > 0 && (
+              <div className="rounded-md border border-surface-border bg-surface-light overflow-hidden">
+                <div className="flex items-center justify-between px-4 py-2 border-b border-surface-border">
+                  <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-widest text-accent">
+                    <Wallet className="w-3.5 h-3.5" />
+                    Trades
+                  </div>
+                  <div className="flex items-center gap-3">
+                    {buyingPower != null && (
+                      <span className="text-[10px] font-mono text-muted">
+                        BP{" "}
+                        <span className="text-foreground">${buyingPower.toFixed(2)}</span>
+                      </span>
+                    )}
+                    <span className={`text-[10px] font-bold font-mono ${
+                      tradeResults.reduce((sum, t) => {
+                        const mult = t.action === "buy" ? -1 : 1;
+                        return sum + mult * t.contracts * t.price;
+                      }, 0) >= 0
+                        ? "text-green-400"
+                        : "text-red-400"
+                    }`}>
+                      P/L{" "}
+                      {(() => {
+                        const pl = tradeResults.reduce((sum, t) => {
+                          const mult = t.action === "buy" ? -1 : 1;
+                          return sum + mult * t.contracts * t.price;
+                        }, 0);
+                        return `${pl >= 0 ? "+" : ""}$${pl.toFixed(2)}`;
+                      })()}
+                    </span>
+                  </div>
+                </div>
+                <div className="max-h-28 overflow-y-auto divide-y divide-surface-border">
+                  {tradeResults.map((t) => (
+                    <div key={t.order_id} className="flex items-center justify-between px-4 py-1.5">
+                      <div className="flex items-center gap-2">
+                        <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${
+                          t.action === "buy"
+                            ? "bg-green-500/20 text-green-400"
+                            : "bg-red-500/20 text-red-400"
+                        }`}>
+                          {t.action}
+                        </span>
+                        <span className="text-[10px] font-mono text-muted truncate max-w-[120px]">
+                          {t.ticker}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2 text-[10px] font-mono text-foreground/60">
+                        <span>{t.side?.toUpperCase()}</span>
+                        <span>×{t?.contracts}</span>
+                        <span>${t.price?.toFixed(2)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Event log */}
             <div className="flex-1 rounded-md border border-surface-border bg-surface overflow-hidden flex flex-col min-h-0">
               <div className="flex-1 overflow-y-scroll">
@@ -910,10 +1094,18 @@ export default function RecordingDashboard({
                             <span className="inline-block w-3 h-3 border-2 border-accent border-t-transparent rounded-md animate-spin" />
                           )}
                           <span className="text-muted">{entry.ts}</span>
+                          {entry.latencyMs != null && (
+                            <span className="text-muted/50">{entry.latencyMs}ms</span>
+                          )}
                         </div>
                         <div className="whitespace-pre-wrap text-foreground/80 pl-5">
                           {entry.text}
                         </div>
+                        {entry.flags.length > 0 && (
+                          <div className="pl-5 mt-0.5 text-green-400 font-semibold">
+                            {entry.flags.join(", ")}
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
